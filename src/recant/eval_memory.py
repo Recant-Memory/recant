@@ -45,7 +45,7 @@ from .store import episodes
 from .store.budget import fit
 from .store.review import decide_memory, memory_queue
 from .store.search import load_entries
-from .version import info as version_info
+from .version import describe, info as version_info
 from .wrap import wrap
 
 TENANT = "00000000-0000-0000-0000-000000000001"
@@ -67,10 +67,12 @@ KEEPER_SYSTEM = ("You keep notes for an assistant about the person in this sessi
 QUESTION_SYSTEM = (
     "You write a memory test from one person's past sessions with an assistant. Return JSON only: "
     '{"questions": [{"kind": "recall"|"update"|"absent", "question": "...", "answer": "...", "quote": "...", "session": N}]}.\n'
-    "- recall: a fact the person stated in an earlier session; `quote` is their exact words from session N stating it, and "
-    "`answer` is a few words that appear in the quote.\n"
-    "- update: a fact the person changed later; `answer` is the newest value, `quote` their exact words from the session N "
-    "where they last stated it.\n"
+    "- recall: a fact the person stated in an earlier session about themselves, their work or their plans (never what they "
+    "asked the assistant); `quote` is their exact words from session N stating it, and `answer` is the fewest words that "
+    "identify the value, taken from the quote: the name, number, date or choice itself, without the words around it "
+    "(\"Juniper\", not \"the Juniper account\"; \"40\", not \"40 boxes\"; \"aisle seats\", not \"always aisle seats\").\n"
+    "- update: a fact the person changed later; `answer` is the newest value, in the fewest words that identify it, `quote` "
+    "their exact words from the session N where they last stated it.\n"
     "- absent: a natural question about them that no session answers; `answer` is \"I don't know\", `quote` empty, `session` 0.\n"
     "Ask each question as the assistant would be asked it later, without hinting at the answer.")
 
@@ -332,7 +334,7 @@ def _count(xs):
 
 def _spent(root: Path) -> dict:
     """Every model call under `root`, priced at list: dollars, tokens by class, calls, latency."""
-    usd, tok, calls, lat = 0.0, {k: 0 for k in ("input", "cache_write", "cache_read", "output", "reasoning")}, 0, []
+    usd, tok, calls, lat, own = 0.0, {k: 0 for k in ("input", "cache_write", "cache_read", "output", "reasoning")}, 0, [], []
     for p in root.glob("**/log/**/*.jsonl"):
         for r in read_run(p, typed=False):
             if r["kind"] != "model_call":
@@ -347,7 +349,9 @@ def _spent(root: Path) -> dict:
             calls += 1
             if r.get("latency_ms") is not None:
                 lat.append(r["latency_ms"] / 1000)
-    return {"usd": usd, "tokens": tok, "calls": calls, "latency": lat}
+            if r.get("overhead_ms") is not None:
+                own.append(r["overhead_ms"])
+    return {"usd": usd, "tokens": tok, "calls": calls, "latency": lat, "overhead_ms": own}
 
 
 def _coverage(root: Path) -> dict:
@@ -422,6 +426,9 @@ def evaluate(sessions: list[dict], questions_path: str, *, raw, model: str, out:
             return
         arm_root = root / arm
         ctx, mv = "", None
+        if arm in ("notes", "memory_v2") and not (arm_root / slug(scope)).exists():
+            say(f"arm {arm}: writing the {'notes' if arm == 'notes' else 'memory'} for a scope ({len(ss)} sessions; the write path "
+                f"is the slow part)")
         if arm == "history":
             kept, total = [], 0
             for s in reversed(ss):                                     # newest first, until the window is full
@@ -472,6 +479,9 @@ def evaluate(sessions: list[dict], questions_path: str, *, raw, model: str, out:
                     f.write(json.dumps(row, ensure_ascii=False) + "\n")
                 rows.append(row)
                 done.add((arm, q["id"]))
+        with lock:
+            n = sum(1 for (a, _) in done if a in arms)
+            say(f"arm {arm}: a scope answered; {n} of {len(qs) * len(arms)} answers in")
 
     for arm in arms:
         answers = _meter_client(raw, root / arm / "answer-store")
@@ -527,6 +537,8 @@ def report(root: Path, rows, built, arms, qhash, model, n_questions) -> dict:
                      "per_correct_usd": write["usd"] / n_correct if n_correct else None},
             "tokens": write["tokens"], "calls": write["calls"],
             "latency": {"answer_call": {"p50": cs._pct(ans["latency"], 0.5), "p95": cs._pct(ans["latency"], 0.95)},
+                        "recant_overhead": {"p50": cs._pct(write["overhead_ms"], 0.5), "p95": cs._pct(write["overhead_ms"], 0.95),
+                                            "n": len(write["overhead_ms"])},
                         "write_path_s": sum(v.get("seconds", 0) for v in info.values()), "write_on_request_path": False},
             "failed_answers": sum(1 for r in rs if r["error"]),
             "scopes": info}
@@ -545,6 +557,7 @@ def report(root: Path, rows, built, arms, qhash, model, n_questions) -> dict:
             out["arms"][arm]["against_history"] = {"difference": b["delta"], "interval": b["interval"],
                                                    "held": quality.held(b["delta"], b["interval"][0]), "verdict": quality.verdict(b)}
     out["coverage"] = _coverage(root)
+    out["total_spend_usd"] = sum(v["cost"]["answers_usd"] + v["cost"]["write_path_usd"] for v in out["arms"].values())
     out["verdict"] = verdict(out)
     from . import friction
     friction.report("eval_memory")
@@ -570,13 +583,15 @@ def verdict(r: dict) -> list[str]:
     ok = [("history", a["history"]["cost"]["per_question_usd"])] + \
          [(k, v["cost"]["per_question_usd"]) for k, v in a.items() if k != "history" and v.get("against_history", {}).get("held")]
     best = min(ok, key=lambda x: x[1])
-    lines.append(f"cheapest arm holding quality against carried history: {best[0]} (${best[1]:.4f} a question)")
     for k, v in a.items():                             # the words-only score first, the value match beside it
         ah = v.get("against_history")
         lines.append(f"{k}: {v['accuracy_words_only']:.1%} words only (95% {v['interval_words_only'][0]:.1%} to "
                      f"{v['interval_words_only'][1]:.1%}), {v['accuracy']:.1%} value match (95% {v['interval'][0]:.1%} to "
                      f"{v['interval'][1]:.1%}), ${v['cost']['per_question_usd']:.4f} a question"
                      + (f"; against history, value match, {ah['difference'] * 100:+.1f} points ({ah['verdict']})" if ah else ""))
+    lines.append(f"cheapest arm holding quality against carried history, on value match: {best[0]} (${best[1]:.4f} a question)")
+    if r.get("total_spend_usd") is not None:
+        lines.append(f"total spend: ${r['total_spend_usd']:.2f} at list prices (answers and write paths, every arm)")
     if r.get("coverage") is not None:
         from . import coverage
         lines.append(coverage.line(r["coverage"], watched=r["coverage"].get("watched", False)))
@@ -585,7 +600,7 @@ def verdict(r: dict) -> list[str]:
 
 def render(r: dict) -> str:
     h = r["header"]
-    L = [f"# recant eval memory", "", f"- Recant {h['recant']['version']} ({h['recant']['commit'][:12]}, {h['recant']['commit_from']})",
+    L = [f"# recant eval memory", "", f"- Recant {describe(h['recant'])}",
          f"- questions sha256 {h['questions_sha256']}: {h['questions']} questions over {h['scopes']} scopes; model {h['model']}",
          f"- scoring: {h['scoring']}; words only (the answer holds the key's words) first, value match (the same date or "
          "amount in another format) beside it", "", "## Verdict", ""] + [f"- {x}" for x in r["verdict"]] + ["", "## Arms", "",
@@ -606,6 +621,8 @@ def render(r: dict) -> str:
               f"- refused by the evidence check: {n['refused']} {n['refused_reasons'] or ''}"]
     L += ["", "## Tokens and latency", ""]
     for k, v in r["arms"].items():
-        L.append(f"- {k}: {v['calls']} calls, tokens {v['tokens']}; answer call p50 {v['latency']['answer_call']['p50']} s; "
+        lat, own = v["latency"]["answer_call"], v["latency"].get("recant_overhead") or {}
+        L.append(f"- {k}: {v['calls']} calls, tokens {v['tokens']}; answer call p50 {lat['p50']} s, p95 {lat['p95']} s; "
+                 f"Recant's own time per call p50 {own.get('p50')} ms, p95 {own.get('p95')} ms ({own.get('n', 0)} calls); "
                  f"write path {v['latency']['write_path_s']:.1f} s, off the request's path")
     return "\n".join(L)

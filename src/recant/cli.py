@@ -29,7 +29,17 @@ from .store import StoreLayout
 def _prices(path):
     if not path:
         return None
-    return {m: Prices(**row) for m, row in json.loads(Path(path).read_text()).items()}
+    try:
+        table = json.loads(Path(path).read_text())
+    except (OSError, ValueError) as exc:
+        raise SystemExit(f"--prices {path}: {exc}")
+    if not isinstance(table, dict):
+        raise SystemExit(f"--prices {path}: the table is a JSON object keyed by model ID, such as "
+                         '{"claude-haiku-5-5": {"input": 0.10, "output": 0.50, "cache_read": 0.01, "cache_write": 0.125}}')
+    try:
+        return {m: Prices.from_row(row, model=m) for m, row in table.items()}
+    except ValueError as exc:
+        raise SystemExit(f"--prices {path}: {exc}")
 
 
 def _host(path, layout=None, tenant=None):
@@ -59,6 +69,7 @@ def run_cost(layout, tenant, host, *, prices=None, since="7d", until=None, as_js
     levers += bill or []
     if as_json:
         return json.dumps({"shape": rep.shape, "levers": [vars(lv) for lv in levers], "overlay": cs.overlay(layout, tenant),
+                           "coverage": rep.coverage(),
                            "billing": "reconciled" if bill is not None else "not visible"}, indent=1, default=str)
     from .billing import NOT_VISIBLE
     return rep.text(levers, cs.ledger(layout, tenant)) + ("" if bill is not None else f"\n{NOT_VISIBLE}")
@@ -116,24 +127,26 @@ def _main(argv) -> int:
     ap.add_argument("--version", action="version", version=version_line())
     sub = ap.add_subparsers(dest="cmd", required=True)
     c = sub.add_parser("cost", help="the cost advisor on a store's log (costs nothing)")
-    c.add_argument("--store", required=True)
-    c.add_argument("--tenant", required=True)
-    c.add_argument("--since", default="7d")
-    c.add_argument("--until")
-    c.add_argument("--host")
-    c.add_argument("--prices")
-    c.add_argument("--json", action="store_true")
-    c.add_argument("--nightly", action="store_true")
-    c.add_argument("--revert")
-    c.add_argument("--reason", default="")
-    c.add_argument("--opt-in", dest="opt_in")
-    c.add_argument("--action", type=json.loads)
-    c.add_argument("--evidence", default="")
+    c.add_argument("--store", required=True, help="the store directory recant.wrap (or your Meter) writes into")
+    c.add_argument("--tenant", required=True, help="the tenant id you passed to recant.wrap")
+    c.add_argument("--since", default="7d", help="the window's start: Nd (the last N days), a date (2026-11-01) or an ISO time; default 7d")
+    c.add_argument("--until", help="the window's end, a date or an ISO time; default now")
+    c.add_argument("--host", help="a host.json describing how your log divides into runs; default the one recant.wrap wrote into the store")
+    c.add_argument("--prices", help="your price table, JSON keyed by model ID, each row in USD per million tokens: "
+                   "input, output, cache_read, cache_write, cache_write_long, batch_factor (README, \"Your own prices\"); "
+                   "default the library's dated list prices")
+    c.add_argument("--json", action="store_true", help="print the report as JSON; each priced model carries its row in the --prices format")
+    c.add_argument("--nightly", action="store_true", help="the nightly pass: check applied levers against their predictions, apply the safe levers that pay, revert any that does not")
+    c.add_argument("--revert", metavar="LEVER_ID", help="take a lever out of force, such as breakpoint.add (with --reason)")
+    c.add_argument("--reason", default="", help="why, for --revert; kept in the store's ledger")
+    c.add_argument("--opt-in", dest="opt_in", metavar="LEVER_ID", help="turn on a your-call lever, such as effort.agent (with --action and --evidence)")
+    c.add_argument("--action", type=json.loads, help="for --opt-in: what the lever does, as JSON, such as '{\"effort\": \"medium\"}'")
+    c.add_argument("--evidence", default="", help="for --opt-in: what shows it holds quality, such as a bench directory")
     c.add_argument("--all", dest="show_all", action="store_true", help="list levers that save nothing in this window too")
     for name, what in (("off", "the wrapper a pure pass-through from the next call; --meter keeps metering only"),
                        ("on", "the wrapper on again from the next call"), ("status", "the switch in force")):
         sw = sub.add_parser(name, help=what)
-        sw.add_argument("--store", required=True)
+        sw.add_argument("--store", required=True, help="the store whose switch to set or read")
         if name == "off":
             sw.add_argument("--meter", action="store_true", help="meter every call, change nothing on the request")
     b = sub.add_parser("bench", help="CALLS THE MODEL: Recant against no Recant on your own tasks, paired and fair")
@@ -150,7 +163,8 @@ def _main(argv) -> int:
     b.add_argument("--client", help="module:function returning your raw client (sync or async); default anthropic's")
     b.add_argument("--prices", help="a price table, as for recant cost")
     b.add_argument("--yes", action="store_true", help="do not ask before spending the estimate")
-    b.add_argument("--parallel", type=int, default=1, help="tasks in flight at once (sync agents; each task still runs its two arms in its drawn order)")
+    b.add_argument("--parallel", type=int, default=1, help="tasks in flight at once, for a sync run_task (an async one runs its own work concurrently); each task still "
+                   "runs its two arms in its drawn order; default 1")
     b.add_argument("--estimate", action="store_true", help="run the first task, print the estimated spend, stop")
     b.add_argument("--allow-mixed", action="store_true", help="resume a bench started on another Recant version")
     b.add_argument("--report", action="store_true", help="only rebuild the report of the bench in --out")
@@ -158,27 +172,27 @@ def _main(argv) -> int:
     em = ev.add_parser("memory", help="four arms over your past sessions: none, carried history, managed notes, memory v2")
     em.add_argument("--sessions", help="sessions.jsonl: {scope, ts, messages} per line")
     em.add_argument("--load", help="module:function returning the same list of sessions")
-    em.add_argument("--model", default="claude-sonnet-5-5")
+    em.add_argument("--model", default="claude-sonnet-5-5", help="the model that drafts the questions, writes the notes and answers, in every arm; default claude-sonnet-5-5")
     em.add_argument("--make-questions", action="store_true", help="draft questions.jsonl from the sessions, then stop for you to read it")
-    em.add_argument("--questions", default="questions.jsonl")
-    em.add_argument("--per-scope", type=int, default=12)
-    em.add_argument("--arms", default=",".join(("none", "history", "notes", "memory_v2")))
-    em.add_argument("--window", type=int, default=150_000, help="carried history's window, in estimated tokens")
+    em.add_argument("--questions", default="questions.jsonl", help="the questions file: written by --make-questions, read by the scoring run; default questions.jsonl in the current directory")
+    em.add_argument("--per-scope", type=int, default=12, help="for --make-questions: at most this many questions per scope; default 12")
+    em.add_argument("--arms", default=",".join(("none", "history", "notes", "memory_v2")), help="comma-separated arms to run; default all four: none,history,notes,memory_v2")
+    em.add_argument("--window", type=int, default=150_000, help="carried history's window, in estimated tokens; default 150000")
     em.add_argument("--out", help="the eval directory; default eval/<UTC stamp>; an existing one resumes")
-    em.add_argument("--parallel", type=int, default=1, help="scopes built and answered at once")
+    em.add_argument("--parallel", type=int, default=1, help="scopes built and answered at once; default 1")
     cv = sub.add_parser("coverage", help="what Recant saw of your traffic, against your own per-run totals (costs nothing)")
     cv.add_argument("--usage", required=True, help="your per-run log, JSON lines: ts, model, tokens_in, tokens_out, cache_read, "
                                                    "cache_write, optional billed (api_key | subscription)")
     cv.add_argument("--store", help="the store Recant metered into (none: compare against an empty meter)")
-    cv.add_argument("--tenant")
+    cv.add_argument("--tenant", help="the tenant id, with --store")
     cv.add_argument("--prices", help="a price table, as for recant cost; default the library's list prices")
-    cv.add_argument("--json", action="store_true")
+    cv.add_argument("--json", action="store_true", help="print the comparison as JSON")
     fb = sub.add_parser("feedback", help="write a numbers-only feedback bundle (and a short form); sends nothing")
     fb.add_argument("--bench", nargs="*", help="bench directories (default: every bench/*/ with a report)")
     fb.add_argument("--eval", nargs="*", dest="evals", help="eval directories (default: every eval/*/ with a report)")
     fb.add_argument("--store", help="a store whose recant cost summary goes in too")
-    fb.add_argument("--tenant")
-    fb.add_argument("--no-form", action="store_true")
+    fb.add_argument("--tenant", help="the tenant id, with --store")
+    fb.add_argument("--no-form", action="store_true", help="skip the six questions; the bundle carries numbers only")
     a = ap.parse_args(argv)
     if a.cmd == "coverage":
         print(run_coverage(a.usage, a.store, a.tenant, prices=_prices(a.prices), as_json=a.json))
@@ -191,8 +205,9 @@ def _main(argv) -> int:
         if a.store and a.tenant:
             layout = StoreLayout(a.store)
             cost = json.loads(run_cost(layout, a.tenant, _host(None, layout, a.tenant), as_json=True))
-            cost = {"shape": cost.get("shape"), "levers": [{"id": lv.get("id"), "kind": lv.get("kind"), "saves_usd": lv.get("saves_usd"),
-                                                          "share": lv.get("share")} for lv in cost.get("levers", [])]}
+            cost = {"shape": cost.get("shape"), "coverage": cost.get("coverage"),
+                    "levers": [{"id": lv.get("id"), "kind": lv.get("kind"), "state": lv.get("state"), "saves_usd": lv.get("saves_usd"),
+                                "share": lv.get("share")} for lv in cost.get("levers", [])]}
         fb_.run(bench_dirs=benches, eval_dirs=evals, cost_json=cost, form=not a.no_form)
         return 0
     if a.cmd == "eval":
@@ -208,7 +223,11 @@ def _main(argv) -> int:
         if a.make_questions:
             r = em_.make_questions(sessions, raw=raw_sdk(False), model=a.model, out_path=a.questions, root=out, per_scope=a.per_scope)
             print(json.dumps(r, indent=1, default=str))
-            print(f"read and edit {a.questions}; it is hashed when scoring starts")
+            print(f"questions written: {Path(a.questions).resolve()} (--questions); the drafting calls were metered in "
+                  f"{(out / 'questions-store').resolve()} (--out)")
+            print(f"read and edit {a.questions}: each answer is the fewest words the reply must contain (a recall or update "
+                  "question is scored on its key's words); the file is hashed when scoring starts. Then run the same "
+                  "command without --make-questions.")
             return 0
         em_.evaluate(sessions, a.questions, raw=raw_sdk(False), model=a.model, out=str(out), arms=tuple(a.arms.split(",")),
                      window_tokens=a.window, parallel=a.parallel)

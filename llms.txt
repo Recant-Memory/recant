@@ -16,15 +16,26 @@ the reference client use.
   `messages.create`, `create(stream=True)`, `messages.stream(...)` and `messages.count_tokens`; meters every call
   (a stream from its final message's usage; thinking tokens as reasoning), carries out the applied safe levers on each
   request, checks the request differs only in cache markers (else sends the host's own). `with client.run("agent",
-  session=...)` (or `async with`) is one host run, with its own log, so concurrent runs are metered apart.
+  session=...)` (or `async with`) is one host run, with its own log, so concurrent runs are metered apart; its first
+  argument is the job its calls are reported and sized under (`run("researcher")`, `run("writer")` for two agents),
+  wrap's `job` when omitted. A request may hold the SDK's own response blocks (`r.content` in a tool loop); one holding anything but plain
+  data and those models (an iterator, a tuple, a file) goes as the host's own objects, untouched, with no lever. Recant's own
+  failure on a call or a run (preparing, reading the response or stream, the run's log, the switch) does not raise
+  into the host: the call is sent as built and counted in the friction log. `recant.wrap` raises on a store it cannot
+  create.
   Recant never times out or retries a call: set your own idle timeout (the SDK's 600 s read timeout does not cut a
   stream that goes silent mid-body, and a mid-body break is not retried); a broken stream is recorded with its error.
 - `recant.metering.Meter(layout, tenant)` — for a host on its own client: `run(job)`, `record(job=, model=, usage=,
   session=, system=, messages=, tools=, max_tokens=)` per model call, `tool(...)` per tool call, `close()`.
 - `recant.levers.apply(request_dict, recant.costshape.overlay(layout, tenant))` — the safe levers on an
   Anthropic-shaped request; `recant.levers.declare_host(layout, tenant)` once, so the advisor applies them.
-- `recant cost --store DIR --tenant T [--nightly] [--all] [--revert ID] [--prices FILE] [--json]` — the report; with
-  `--nightly`, apply what is eligible and check what was applied (realized against predicted, after 50 runs or 7 days).
+- `recant cost --store DIR --tenant T [--since 7d] [--nightly] [--all] [--revert ID] [--prices FILE] [--json]` — the
+  report; with `--nightly`, apply what is eligible and check what was applied (realized against predicted, after 50
+  runs or 7 days).
+- `--prices FILE` (cost, bench, coverage): JSON keyed by model ID, each row in USD per million tokens: `input`,
+  `output`, optional `cache_read`, `cache_write` (both default to `input`), `cache_write_long`, `batch_factor`, and
+  `above` + `over` for a second card on prompts over `above` tokens. The library's list (dated 2026-11-05) prices
+  the Claude models in `recant.costshape.LIST_PRICES`; an unpriced model is tokens only. `recant cost --json` prints each row in this format.
 - `recant.costshape` — `report`, `advise`, `apply`, `check`, `nightly`, `overlay`, `LIST_PRICES` (dated; overridable).
 - `recant.billing.reconcile` — the log against the provider's usage report, given a `BillingSource`.
 - `recant.metering.from_claude_code(result, meter, billing=)` / `from_agent_sdk(result_message, meter, billing=,
@@ -40,8 +51,9 @@ the reference client use.
 - Every report carries a Coverage line; a bench verdict is qualified below 90% of calls or of list-priced cost, and
   gives no overall saving below 50%.
 - `recant coverage --usage runs.jsonl [--store DIR --tenant T] [--prices FILE] [--json]` — your own per-run totals
-  (`ts`, `model`, `tokens_in`, `tokens_out`, `cache_read`, `cache_write`, optional `billed`) against what Recant
-  metered on the same days, by model and provider.
+  (`ts`, `model`, `tokens_in` = uncached input as the Anthropic SDK counts it, `tokens_out`, `cache_read`,
+  `cache_write`, optional `billed`; a line per call, task or day) against what Recant metered on the same days, by
+  model and provider.
 
 ## Measuring it yourself
 
@@ -49,11 +61,20 @@ the reference client use.
   [--out DIR] [--yes] [--estimate]` — calibration, frozen hashed predictions, paired arms with alternating order, a
   cache salt and a fresh store per arm; `report.md`/`report.json` with cost, tokens, quality, latency, predicted against
   realized, failures. `--arm-a safe --arm-b safe` is an A/A run; `safe+<lever id>` opts a your-call lever into an arm.
+  `client` is a wrapped `AsyncAnthropic` for an `async def run_task`, else `Anthropic`; one client per bench (a sync
+  agent in an async host awaits its calls on it). Prints a line per task run. `--report --prices FILE` rebuilds the
+  report at another table; frozen are the levers' shares, the dollars on both sides are at the report's prices.
 - `recant eval memory --sessions S --make-questions` then `--questions Q [--arms none,history,notes,memory_v2]` —
-  memory on your own sessions; questions frozen by hash; mechanical scoring from the `ANSWER:` line.
-- `recant feedback` — the six-question form and a numbers-only bundle, every string on an allow-list; nothing is sent.
-- `recant off [--meter] | on | status --store DIR` (or `RECANT=off|meter|on`) — the switch, read on every call.
-- `recant --version` — version and commit; every report and bundle header carries them.
+  memory on your own sessions; questions frozen by hash; mechanical scoring from the `ANSWER:` line (every word of the
+  key, or the same date or amount; keep keys minimal). `--model` (default `claude-sonnet-5-5`) drafts, writes and
+  answers in every arm.
+- `recant feedback [--store DIR --tenant T]` — the six-question form and a numbers-only bundle (the store's coverage
+  by provider and public model included); every string Recant writes passes an allow-list, the form's answers go in as
+  typed, shown first; nothing is sent. The friction log is `~/.recant/friction.jsonl` (or `$RECANT_HOME`).
+- `recant off [--meter] | on | status --store DIR` (or `RECANT=off|meter|on`, which overrides the store's file) — the
+  switch, read on every call.
+- `recant --version` — version and, where recorded, the commit (not recorded in a PyPI install); every report and
+  bundle header carries them.
 
 ## Managed notes (the default memory)
 

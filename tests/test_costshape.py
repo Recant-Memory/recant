@@ -36,7 +36,7 @@ def test_the_price_source_is_the_consumers_table_then_the_list_then_billed_cost_
     profiles, src, notes = cs.profiles_for(calls, {"mine": Prices(input=1.0, output=2.0, cache_read=0.1, cache_write=1.25,
                                                                  cache_write_long=2.0)}, today=date(2026, 10, 10))
     assert src["mine"] == "consumer's table" and profiles["mine"].w_long == 2.0 and profiles["mine"].r == pytest.approx(0.1)
-    assert src["claude-opus-5-5"].startswith("list prices as of 2026-10-09") and notes == []
+    assert src["claude-opus-5-5"] == f"list prices as of {cs.LIST_PRICES_AS_OF}" and notes == []
     assert src["theirs"].startswith("learned from 8 billed calls")
     assert set(profiles) == {"mine", "claude-opus-5-5", "theirs"}
     _, src2, _ = cs.profiles_for([call("x", 0, start=0, model="nobody")])

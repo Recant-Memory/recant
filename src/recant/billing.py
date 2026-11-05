@@ -13,7 +13,8 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Callable, Optional, Protocol
 
 TOKEN_CLASSES = ("uncached", "cache_write_5m", "cache_write_1h", "cache_read", "output")
-NOT_VISIBLE = "calls outside Recant are not visible (no billing access)"
+NOT_VISIBLE = ("billing: not reconciled (no billing access), so calls made on your key outside this process are not checked "
+               "against the provider's bill; the coverage line above counts only what this process sent")
 
 
 @dataclass(frozen=True)

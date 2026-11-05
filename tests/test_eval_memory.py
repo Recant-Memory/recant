@@ -126,8 +126,14 @@ def test_four_arms_scored_against_history_with_the_write_path_counted(sess, tmp_
     assert a["notes"]["cost"]["write_path_usd"] > 0 and a["none"]["cost"]["write_path_usd"] == pytest.approx(0, abs=1e-12)
     assert a["memory_v2"]["scopes"]["user:ana"]["accepted"] >= 2 and a["memory_v2"]["correct"] >= 4
     assert a["notes"]["against_history"]["held"] and not a["none"]["against_history"]["held"]
-    assert rep["verdict"][0].startswith("cheapest arm holding quality against carried history:")
-    assert (tmp_path / "e" / "report.md").read_text().startswith("# recant eval memory")
+    v = rep["verdict"]
+    assert v[0].startswith("none: ") and "words only" in v[0].split(",")[0]                        # leads with the strict score
+    assert any(x.startswith("cheapest arm holding quality against carried history, on value match:") for x in v)
+    assert rep["total_spend_usd"] == pytest.approx(sum(x["cost"]["answers_usd"] + x["cost"]["write_path_usd"] for x in a.values()))
+    assert any(x.startswith("total spend: $") for x in v)
+    md = (tmp_path / "e" / "report.md").read_text()
+    assert md.startswith("# recant eval memory") and "Recant's own time per call p50" in md and ", p95 " in md
+    assert a["history"]["latency"]["recant_overhead"]["n"] > 0
 
 
 def test_scoring_is_mechanical():

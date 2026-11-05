@@ -181,8 +181,7 @@ def test_thinking_reaches_the_cost_report(layout):
             client.messages.create(**REQ)
     host = cs.HostShape(agent_jobs=("agent",), agent_run_jobs=("agent",), carries_out=("breakpoint.add",))
     text = cs.report(layout, TENANT, host, since="30d").text([], [])
-    assert "(reasoning 72%)" in text                                                      # 180 of 250 output tokens
-    assert "output 250/call (reasoning 72%)" in text
+    assert "output 250/call (72% of it reasoning)" in text                                # 180 of 250 output tokens
 
 
 def test_the_thinking_setting_is_recorded_in_recants_terms(layout):

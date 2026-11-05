@@ -101,8 +101,50 @@ class Prices:
     cache_write: Optional[float] = None
     batch_factor: float = 1.0
     cache_write_long: Optional[float] = None   # a write at the long cache lifetime; defaults to `cache_write`
+    above: Optional[int] = None                # a model priced by prompt length: a request whose prompt (input,
+    over: Optional["Prices"] = None            # cache reads and cache writes) is over `above` tokens pays `over`
+
+    FIELDS = ("input", "output", "cache_read", "cache_write", "cache_write_long", "batch_factor", "above", "over")
+
+    @classmethod
+    def from_row(cls, row: Any, *, model: str = "?") -> "Prices":
+        """A row of a JSON price table, checked: a plain error naming the model and the field, never a traceback."""
+        if not isinstance(row, dict):
+            raise ValueError(f"model {model!r}: a row is an object such as {{\"input\": 2.0, \"output\": 10.0}}, not {type(row).__name__}")
+        unknown = [k for k in row if k not in cls.FIELDS]
+        if unknown:
+            raise ValueError(f"model {model!r}: unknown field {unknown[0]!r}; the fields are {', '.join(cls.FIELDS)} "
+                             "(all prices in USD per million tokens)")
+        import math
+        for k in ("input", "output"):
+            if row.get(k) is None:
+                raise ValueError(f"model {model!r}: {k!r} is required (USD per million tokens)")
+        for k in ("input", "output", "cache_read", "cache_write", "cache_write_long", "batch_factor"):
+            if k not in row or (row[k] is None and k in ("cache_read", "cache_write", "cache_write_long")):
+                continue                                          # an optional price left out or null: its default
+            v = row[k]
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v < 0:
+                what = "a factor" if k == "batch_factor" else "a number of USD per million tokens"
+                raise ValueError(f"model {model!r}: {k!r} is {what}, not {v!r}")
+        if ("above" in row) != ("over" in row):
+            raise ValueError(f"model {model!r}: 'above' (a prompt length in tokens) and 'over' (the row for prompts over it) go together")
+        over = None
+        if "over" in row:
+            if not isinstance(row["above"], int) or isinstance(row["above"], bool) or row["above"] <= 0:
+                raise ValueError(f"model {model!r}: 'above' is a whole number of prompt tokens, not {row['above']!r}")
+            if isinstance(row["over"], dict) and ("above" in row["over"] or "over" in row["over"]):
+                raise ValueError(f"model {model!r}: 'over' has one more card, not another split")
+            over = cls.from_row(row["over"], model=model)
+        return cls(**{k: v for k, v in row.items() if k != "over"}, over=over)
+
+    def at(self, prompt: int) -> "Prices":
+        """The card a request with a prompt of this many tokens pays."""
+        return self.over if (self.above is not None and self.over is not None and prompt > self.above) else self
 
     def cost_usd(self, usage: "Usage", *, batch: bool = False) -> float:
+        card = self.at(usage.input + usage.cache_read + usage.cache_write)
+        if card is not self:
+            return card.cost_usd(usage, batch=batch)
         read = self.cache_read if self.cache_read is not None else self.input
         write = self.cache_write if self.cache_write is not None else self.input
         write_long = self.cache_write_long if self.cache_write_long is not None else write

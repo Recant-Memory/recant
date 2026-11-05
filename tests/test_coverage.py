@@ -237,3 +237,46 @@ def test_the_feedback_bundle_carries_coverage_by_provider_and_public_model_only(
     assert u[2]["host"] is None                                    # a raw domain never passes, even if one slipped in
     assert out["calls_unseen"] == 3 and out["share_calls"] == pytest.approx(10 / 13)
     assert "customer-name" not in json.dumps(out) and "house-model" not in json.dumps(out)
+
+
+def test_recant_feedback_with_a_store_carries_the_store_s_unseen_traffic_and_lever_states(tmp_path, monkeypatch):
+    """An outside developer's case: an unwrapped OpenAI call, seen by `recant cost`, must reach the bundle `recant feedback
+    --store` writes (in 0.3.1 the bundle took only the levers from the store, so the unseen provider was dropped)."""
+    from recant import cli
+    monkeypatch.setenv("RECANT_HOME", str(tmp_path / "home"))
+    monkeypatch.chdir(tmp_path)
+    client = wrapped_anthropic(tmp_path)
+    with client.run("agent", session="s1"):
+        for _ in range(3):
+            client.messages.create(model="claude-sonnet-5-5", max_tokens=64, messages=[{"role": "user", "content": SECRET_PROMPT}])
+        c = httpx2.Client(transport=httpx2.MockTransport(openai_handler))          # inside the run: written as it closes
+        c.post("https://api.openai.com/v1/chat/completions",
+               json={"model": "gpt-4o-mini", "messages": [{"role": "user", "content": SECRET_PROMPT}]})
+    import functools
+    from recant import feedback
+    answers = iter(["", "", "", "", "", "", "y"])
+    monkeypatch.setattr(feedback, "run", functools.partial(feedback.run, ask=lambda q="": next(answers), say=lambda *a: None))
+    assert cli.main(["feedback", "--store", str(tmp_path / "store"), "--tenant", "t1", "--bench", "--eval"]) == 0
+    import zipfile
+    zp, = list(tmp_path.glob("recant-feedback-*.zip"))
+    b = json.loads(zipfile.ZipFile(zp).read("bundle.json"))
+    un = b["cost"]["coverage"]["unseen"]
+    assert [(u["provider"], u["model"], u["requests"]) for u in un] == [("openai", "gpt-4o-mini", 1)]
+    assert all("state" in lv for lv in b["cost"]["levers"])
+    assert SECRET_PROMPT not in json.dumps(b) and SECRET_REPLY not in json.dumps(b)
+
+
+def test_a_share_never_reads_100_percent_while_part_is_missing():
+    assert (coverage.pct(0.998), coverage.pct(0.9999), coverage.pct(1.0), coverage.pct(0.42)) == ("99.8%", "99.9%", "100%", "42%")
+
+
+def test_reconcile_names_the_unpriced_model_it_leaves_out_of_the_cost_share():
+    """An outside developer's case: 445 tokens of gpt-4o-mini unseen and unpriced read as '100% of the tokens, 100% of the cost'."""
+    rows = [{"ts": "2026-11-05T10:00:00+00:00", "model": "claude-sonnet-5-5", "tokens_in": 238_000, "tokens_out": 407, "cache_read": 0, "cache_write": 0},
+            {"ts": "2026-11-05T10:01:00+00:00", "model": "gpt-4o-mini", "tokens_in": 400, "tokens_out": 45, "cache_read": 0, "cache_write": 0}]
+    calls = [metered("2026-11-05", "claude-sonnet-5-5", 238_000, 407, 0, 0)]
+    r = coverage.reconcile(rows, calls, price=lambda m, u: None if m == "gpt-4o-mini" else
+                           cs.LIST_PRICES[m].bill(u.get("input", 0), u.get("cache_write", 0), u.get("cache_read", 0), u.get("output", 0)))
+    text = coverage.render_reconcile(r)
+    assert "Recant saw 99.8% of the tokens" in text
+    assert "unpriced, so left out of the cost share: gpt-4o-mini (445 tokens, 0% seen)" in text

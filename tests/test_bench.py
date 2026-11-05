@@ -93,6 +93,10 @@ AGENT = textwrap.dedent('''
             r = await client.messages.create(model="claude-sonnet-5-5", max_tokens=256, system=HANDBOOK, messages=msgs)
             msgs.append({"role": "assistant", "content": r.content[0].text})
         return len(msgs)
+    def run_task_two_models(task, client):
+        r = client.messages.create(model="claude-sonnet-5-5", max_tokens=256, system=HANDBOOK, messages=[{"role": "user", "content": "a"}])
+        client.messages.create(model="house-model-1", max_tokens=64, messages=[{"role": "user", "content": r.content[0].text}])
+        return 1
     def grade(task, result):
         return task["id"] % 5 != 0
 ''')
@@ -203,6 +207,20 @@ def test_an_async_agent_runs_and_the_estimate_comes_first(setup):
     assert len(api.bodies) == 4 and not (tmp / "est" / "arm-B").exists()                     # one task run, then stopped
 
 
+def test_the_estimate_names_the_models_it_has_no_price_for_before_anything_is_spent(setup):
+    tmp, tasks = setup
+    lines = []
+    out = bench.run(tasks_path=tasks(8), run_spec="bench_agent:run_task_two_models", out=str(tmp / "unp"), estimate_only=True,
+                    calibrate=2, sdk_factory=lambda aio: SimAPI(), say=lines.append)
+    assert out["estimate"]["unpriced_models"] == ["house-model-1"] and out["estimate"]["unpriced_calls"] == 1
+    warn, = [x for x in lines if x.startswith("warning:")]
+    assert "1 of the first task's 2 calls" in warn and "house-model-1" in warn and "--prices" in warn
+    lines.clear()
+    bench.run(tasks_path=tasks(8), run_spec="bench_agent:run_task", out=str(tmp / "pri"), estimate_only=True, calibrate=2,
+              sdk_factory=lambda aio: SimAPI(), say=lines.append)
+    assert not any(x.startswith("warning:") for x in lines)                                 # every model priced: no warning
+
+
 def test_modes_that_do_not_exist_are_refused(setup):
     tmp, tasks = setup
     with pytest.raises(SystemExit, match="does not carry managed notes"):
@@ -212,3 +230,29 @@ def test_modes_that_do_not_exist_are_refused(setup):
     with pytest.raises(SystemExit, match="not a terminal"):
         bench.run(tasks_path=tasks(4), run_spec="bench_agent:run_task", out=str(tmp / "q"), calibrate=1,
                   sdk_factory=lambda aio: SimAPI(), say=lambda *_: None)
+
+
+def test_the_bench_says_how_far_it_has_got_after_the_estimate(setup):
+    import re
+    tmp, tasks = setup
+    rep, lines = go(tasks(8), tmp / "prog", SimAPI(), calibrate=2)
+    prog = [x for x in lines if re.match(r"^\[\d+/\d+\] task \d+ arm [ABC]: (passed|failed|done|\w+Error)", x)]
+    assert len(prog) == 1 + 2 * 6 and prog[0].startswith("[2/14]") and prog[-1].startswith("[14/14]") and "min left" in prog[-1]   # task 0 priced the run
+    assert lines.index(prog[0]) > next(i for i, x in enumerate(lines) if "estimated spend" in x)      # after the estimate
+
+
+def test_a_report_rebuilt_at_other_prices_restates_both_sides_of_each_prediction(setup):
+    """What is frozen is each lever's share; the dollars are at the report's prices, cost per task's base included. At ten
+    times every price the ratios are unchanged (in 0.3.1 cost per task kept its dollars from the run's table)."""
+    from recant.provider import Prices
+    tmp, tasks = setup
+    go(tasks(10), tmp / "rp", SimAPI(), calibrate=3)
+    a = bench.build_report(tmp / "rp")
+    b = bench.build_report(tmp / "rp", prices={"claude-sonnet-5-5": Prices(input=20, output=100, cache_read=1, cache_write=25, cache_write_long=40)})
+    ka = {(p["arm"], p["id"]): p for p in a["predictions"]}
+    kb = {(p["arm"], p["id"]): p for p in b["predictions"]}
+    for k in ka:
+        if ka[k].get("ratio") is not None:
+            assert kb[k]["ratio"] == pytest.approx(ka[k]["ratio"], rel=5e-3), k   # check() rounds dollars to 4 places
+    cpt = kb[("A", "cost per task")]
+    assert cpt["predicted_usd"] == pytest.approx(10 * ka[("A", "cost per task")]["predicted_usd"], rel=1e-6)

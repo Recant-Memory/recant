@@ -21,10 +21,15 @@ Then `recant cost --store store --tenant t1` prices the calls and, with `--night
 carries it out. The host shape the advisor needs is written to the store once, where `recant cost` finds it."""
 from __future__ import annotations
 
+import datetime
 import inspect
+import sys
 import time
+import types
 from contextvars import ContextVar
 from typing import Any, Optional
+
+import pydantic
 
 from . import costshape, coverage, levers, quality, switch
 from .metering import Meter
@@ -38,6 +43,95 @@ def _get(o, k, default=None):
     return o.get(k, default) if isinstance(o, dict) else getattr(o, k, default)
 
 
+_TYPE_MRO = type.__dict__["__mro__"].__get__           # type's own descriptors: reading a class through them calls no
+_TYPE_DICT = type.__dict__["__dict__"].__get__          # code of a host metaclass (no __getattribute__, no __eq__)
+_TYPE_NAME = type.__dict__["__name__"].__get__
+
+
+def _is_plain_scalar(t) -> bool:
+    return t is str or t is int or t is float or t is bool          # identity, never ==
+
+
+def _sdk_model(o) -> bool:
+    """One of the Anthropic SDK's own model classes (a response block a tool loop puts back), told by its class alone,
+    through type's own descriptors: nothing of the host's is called."""
+    t = type(o)
+    if not any(c is pydantic.BaseModel for c in _TYPE_MRO(t)):
+        return False
+    mod = _TYPE_DICT(t).get("__module__")
+    if type(mod) is not str or not mod.startswith("anthropic."):
+        return False
+    m = sys.modules.get(mod)                             # the loaded SDK module of that name must hold this very class
+    return m is not None and type(m) is types.ModuleType and \
+        object.__getattribute__(m, "__dict__").get(_TYPE_NAME(t)) is t   # (a class merely naming the module is not one)
+
+
+def _fields(o):
+    """An SDK model's field values and extras, from the instance's own storage (no attribute access, no dump)."""
+    yield from object.__getattribute__(o, "__dict__").values()
+    extra = object.__getattribute__(o, "__pydantic_extra__")
+    if type(extra) is dict:
+        yield from extra.values()
+
+
+def _readable(o, opaque: list) -> None:
+    """Note in `opaque` every value Recant will not read. Types only, by identity and type's own descriptors: nothing
+    of the host's is called (no iteration, comparison, attribute or serializer of a host object), so deciding cannot
+    change what the SDK will send. An SDK model is looked inside: a host value in its fields makes it unread too."""
+    t = type(o)
+    if o is None or _is_plain_scalar(t):
+        return
+    if t is dict:
+        for k, v in o.items():                           # an exact dict: the builtin's own iteration
+            if type(k) is not str:
+                opaque.append(_TYPE_NAME(type(k)))
+            _readable(v, opaque)
+        return
+    if t is list:
+        for x in o:
+            _readable(x, opaque)
+        return
+    if _sdk_model(o):
+        try:
+            for v in _fields(o):
+                _readable(v, opaque)
+        except Exception:                                # noqa: BLE001 — storage Recant cannot see: not read
+            opaque.append(_TYPE_NAME(t))
+        return
+    opaque.append(_TYPE_NAME(t))
+
+
+def _plain(o):
+    """A readable request (see `_readable`) as the plain JSON data the SDK sends: the SDK's own models by the SDK's own
+    dump (`exclude_unset`, JSON mode, by alias, less `__api_exclude__`), so a tool loop's
+    `{"role": "assistant", "content": r.content}` goes out in the bytes the raw SDK would send."""
+    t = type(o)
+    if t is dict:
+        return {k: _plain(v) for k, v in o.items()}
+    if t is list:
+        return [_plain(x) for x in o]
+    if _sdk_model(o):
+        return _plain(o.model_dump(exclude_unset=True, mode="json", by_alias=True, exclude=getattr(o, "__api_exclude__", None)))
+    return o
+
+
+def _view(o):
+    """The meter's copy of a request Recant does not read: plain values kept, every other value written as
+    `<TypeName>`, by type alone (nothing of the host's is called); an SDK model is dumped only if it holds nothing else."""
+    t = type(o)
+    if o is None or _is_plain_scalar(t):
+        return o
+    if t is dict:
+        return {(k if type(k) is str else f"<{_TYPE_NAME(type(k))}>"): _view(v) for k, v in o.items()}
+    if t is list:
+        return [_view(x) for x in o]
+    if _sdk_model(o):
+        inner: list = []
+        _readable(o, inner)
+        return f"<{_TYPE_NAME(t)}>" if inner else _plain(o)
+    return f"<{_TYPE_NAME(t)}>"
+
+
 def _usage(u) -> dict:
     """The SDK's usage, in Recant's names: thinking tokens as reasoning, the 1-hour part of the cache writes as long."""
     n = lambda v: int(v or 0)                                                       # noqa: E731
@@ -47,21 +141,28 @@ def _usage(u) -> dict:
             "cache_write_long": n(_get(_get(u, "cache_creation"), "ephemeral_1h_input_tokens"))}
 
 
+def _field(d, key):
+    """A field of a plain dict the host sent; None for anything else (Recant reads nothing it did not walk)."""
+    return d.get(key) if type(d) is dict else None
+
+
 def _reasoning(thinking) -> Optional[str]:
     """The request's thinking setting in Recant's terms: "off" when disabled, "on" when asked for, None when the host
     left it to the model's default (which, on the current models, thinks)."""
-    kind = (thinking or {}).get("type")
+    kind = _field(thinking, "type")
     return None if kind is None else "off" if kind == "disabled" else "on"
 
 
 def _markers(req: dict) -> list[str]:
     """Where the request carries cache markers, and at which lifetime: `system.0 (1h)`, `messages.5.0 (5m)`."""
     out = []
-    groups = [("system", req.get("system"))] + [(f"messages.{i}", m.get("content")) for i, m in enumerate(req.get("messages") or [])]
+    msgs = req.get("messages")                           # only an exact list is read: anything else is the host's own
+    groups = [("system", req.get("system"))] + [(f"messages.{i}", m.get("content") if type(m) is dict else None)
+                                                  for i, m in enumerate(msgs if type(msgs) is list else [])]
     for at, blocks in groups:
-        for j, b in enumerate(blocks if isinstance(blocks, list) else []):
-            if isinstance(b, dict) and "cache_control" in b:
-                out.append(f"{at}.{j} ({b['cache_control'].get('ttl', '5m')})")
+        for j, b in enumerate(blocks if type(blocks) is list else []):
+            if type(b) is dict and "cache_control" in b:
+                out.append(f"{at}.{j} ({_field(b['cache_control'], 'ttl') or '5m'})")
     return out
 
 
@@ -94,20 +195,46 @@ class _Call:
     """One call in flight: what the host built, what was sent, its run, and the one record it gets."""
 
     def __init__(self, w: "Wrapped", kwargs: dict, *, apply: bool = True):
+        self.w, self.ttft, self.inside, self.t0, self.opaque = w, None, 0.0, 0.0, False
+        try:
+            self.t0 = time.monotonic()
+            self._prepare(kwargs, apply)
+        except Exception as exc:                                         # noqa: BLE001 — Recant's own failure never
+            self.broken(exc)                                             # reaches the host: its request goes as built
+            self.sent = _host_request(kwargs)                            # (the walk reads nothing it could consume)
+
+    def broken(self, exc: BaseException) -> None:
+        """Recant failed on this call: nothing more is metered for it, the failure is counted in the friction log."""
+        from . import friction
+        self.done, self.opted, self.equivalent = True, [], None
+        friction.wrapper_failed(exc)                                     # never raises
+
+    def _prepare(self, kwargs: dict, apply: bool) -> None:
         t = time.perf_counter()
-        self.w = w
+        w = self.w
         w._ready()
-        built = dict(kwargs)
-        self.session = built.pop("session", None) or w.session
+        host = dict(kwargs)
+        self.session = host.pop("session", None) or w.session
         self.meter = w._meter()
+        self.job = w._job()                                              # the run's job: `run("researcher")`, else wrap's
+        opaque: list = []
+        _readable(host, opaque)                                          # first decide, by type alone; then read
+        if opaque:                                                       # a value Recant does not read: the host's own
+            apply = False                                                # objects go, untouched, with no lever
+            built = _view(host)
+            self.meter.log.count("request_opaque")
+        else:
+            built = _plain(host)                                         # the SDK's own blocks as the SDK sends them
         ov = costshape.overlay(w.layout, w.tenant) if (apply and w.apply_levers) else {}
         sent = levers.apply(built, ov) if ov else dict(built)
-        self.equivalent = quality.equivalent(built, sent)
+        self.equivalent = True if opaque else quality.equivalent(built, sent)
         if not self.equivalent:                                          # never send what the host did not build, bar the markers
             sent = dict(built)
-        sent, self.opted = levers.apply_opted_in(sent, ov, w.job) if ov else (sent, [])   # gated levers: after the check
-        w.last_equivalent, w.last_sent_markers = self.equivalent, _markers(sent)
-        self.built, self.sent, self.done = built, sent, False
+        sent, self.opted = levers.apply_opted_in(sent, ov, self.job) if ov else (sent, [])   # gated levers: after the check
+        if opaque:
+            sent = host
+        w.last_equivalent, w.last_sent_markers = self.equivalent, (_markers(sent) if not opaque else [])
+        self.built, self.sent, self.done, self.opaque = built, sent, False, bool(opaque)
         self.ttft: Optional[float] = None                                # streams: seconds from the send to the first event
         self.inside = time.perf_counter() - t                            # Recant's own time: before the send, per event, after
         self.t0 = time.monotonic()
@@ -115,12 +242,19 @@ class _Call:
     def record(self, *, usage: Optional[dict] = None, model=None, stop_reason=None, error=None) -> None:
         if self.done:
             return
+        try:
+            self._record(usage=usage, model=model, stop_reason=stop_reason, error=error)
+        except Exception as exc:                                         # noqa: BLE001 — the host has its response
+            self.broken(exc)
+
+    def _record(self, *, usage, model, stop_reason, error) -> None:
         arrived, t = time.monotonic(), time.perf_counter()
         self.done = True
         b = self.built
-        kw = dict(job=self.w.job, model=str(model or b.get("model")), usage=usage or {}, session=self.session,
+        req = self.built if self.opaque else self.sent                   # an unread request: only its type-only view
+        kw = dict(job=self.job, model=str(model or b.get("model")), usage=usage or {}, session=self.session,
                   system=b.get("system"), tools=b.get("tools"), messages=b.get("messages"), max_tokens=b.get("max_tokens"),
-                  effort=(self.sent.get("output_config") or {}).get("effort"), reasoning=_reasoning(self.sent.get("thinking")),
+                  effort=_field(req.get("output_config"), "effort"), reasoning=_reasoning(req.get("thinking")),
                   latency_ms=int((arrived - self.t0) * 1000), stop_reason=stop_reason, error=error,
                   ttft_ms=None if self.ttft is None else int(self.ttft * 1000), bench_task=self.w.task_tag)
         kw["overhead_ms"] = round((self.inside + time.perf_counter() - t) * 1000, 3)   # the record's own write excluded
@@ -130,7 +264,14 @@ class _Call:
             self.meter.log.count(f"opted_in:{lid}")
 
     def message(self, msg) -> None:
-        self.record(usage=_usage(_get(msg, "usage")), model=_get(msg, "model"), stop_reason=_get(msg, "stop_reason"))
+        if self.done:
+            return
+        try:
+            usage, model, stop = _usage(_get(msg, "usage")), _get(msg, "model"), _get(msg, "stop_reason")
+        except Exception as exc:                                         # noqa: BLE001 — the host has its response
+            self.broken(exc)
+            return
+        self.record(usage=usage, model=model, stop_reason=stop)
 
     def failed(self, exc: BaseException, *, usage: Optional[dict] = None, model=None) -> None:
         """A call that failed: the error, and whatever usage a stream had reported before it broke."""
@@ -138,15 +279,22 @@ class _Call:
 
     def snapshot(self, stream, error: Optional[BaseException] = None) -> None:
         """The helper stream's message as accumulated so far: the final one when the host read it through."""
+        if self.done:
+            return
         try:
             msg = stream.current_message_snapshot
         except Exception:                                                # noqa: BLE001 — no event arrived before the close
             msg = None
-        usage, model = (_usage(_get(msg, "usage")), _get(msg, "model")) if msg is not None else (None, None)
+        try:
+            usage, model = (_usage(_get(msg, "usage")), _get(msg, "model")) if msg is not None else (None, None)
+            stop = _get(msg, "stop_reason")
+        except Exception as exc:                                         # noqa: BLE001
+            self.broken(exc)
+            return
         if error is not None:
             self.failed(error, usage=usage, model=model)
         else:
-            self.record(usage=usage, model=model, stop_reason=_get(msg, "stop_reason"))
+            self.record(usage=usage, model=model, stop_reason=stop)
 
 
 # ---------------------------------------------------------------- create(stream=True): the raw event stream
@@ -155,11 +303,16 @@ class _RawStream:
         self._inner, self._call, self._ev = inner, call, _Events()
 
     def _see(self, ev):
-        t = time.perf_counter()
-        if self._call.ttft is None:
-            self._call.ttft = time.monotonic() - self._call.t0
-        self._ev.see(ev)
-        self._call.inside += time.perf_counter() - t
+        if self._call.done:
+            return
+        try:
+            t = time.perf_counter()
+            if self._call.ttft is None:
+                self._call.ttft = time.monotonic() - self._call.t0
+            self._ev.see(ev)
+            self._call.inside += time.perf_counter() - t
+        except Exception as exc:                                         # noqa: BLE001 — the host still gets every event
+            self._call.broken(exc)
 
     def __iter__(self):
         try:
@@ -223,8 +376,11 @@ class _FirstEvent:
         self._inner, self._call = inner, call
 
     def _first(self):
-        if self._call.ttft is None:
-            self._call.ttft = time.monotonic() - self._call.t0
+        try:
+            if self._call.ttft is None and not self._call.done:
+                self._call.ttft = time.monotonic() - self._call.t0
+        except Exception as exc:                                         # noqa: BLE001 — the host still gets every event
+            self._call.broken(exc)
 
     def __iter__(self):
         for ev in self._inner:
@@ -241,8 +397,11 @@ class _FirstEvent:
 
 
 def _time_first_event(stream, call: _Call) -> None:
-    if hasattr(stream, "_raw_stream"):
-        stream._raw_stream = _FirstEvent(stream._raw_stream, call)
+    try:
+        if not call.done and hasattr(stream, "_raw_stream"):
+            stream._raw_stream = _FirstEvent(stream._raw_stream, call)
+    except Exception as exc:                                             # noqa: BLE001
+        call.broken(exc)
 
 
 class _StreamManager:
@@ -368,14 +527,24 @@ class _Run:
         self.w, self.job, self.session, self.params, self.token = w, job, session, params, None
 
     def __enter__(self):
-        meter = Meter(self.w.layout, self.w.tenant, key_label=self.w.key_label)   # its log opens on the first metered call:
-        self.token = self.w._current.set((meter, self.session, self.job, self.params))   # a run with the switch off writes nothing
+        try:
+            meter = Meter(self.w.layout, self.w.tenant, key_label=self.w.key_label)   # its log opens on the first metered
+        except Exception as exc:                                          # noqa: BLE001 — call: a run with the switch off
+            from . import friction                                        # writes nothing. Should Recant fail here, the
+            friction.wrapper_failed(exc)                                  # run's calls go out as built, unmetered
+            meter = None
+        self.token = self.w._current.set((meter, self.session, self.job, self.params))
         return self.w
 
     def __exit__(self, *exc):
         meter = self.w._current.get()[0]
         self.w._current.reset(self.token)
-        meter.close()
+        if meter is not None:
+            try:
+                meter.close()
+            except Exception as e:                                        # noqa: BLE001 — never the host's error
+                from . import friction
+                friction.wrapper_failed(e)
 
     async def __aenter__(self):
         return self.__enter__()
@@ -403,8 +572,14 @@ class Wrapped:
             coverage.watch(self.layout, tenant)
 
     def mode(self) -> str:
-        """The switch (`recant.switch`), read on every call: on, off or meter."""
-        return switch.state(self.layout)
+        """The switch (`recant.switch`), read on every call: on, off or meter. Should reading it fail inside Recant, the
+        call is a pure pass-through ("off") and the failure is counted."""
+        try:
+            return switch.state(self.layout)
+        except Exception as exc:                                         # noqa: BLE001
+            from . import friction
+            friction.wrapper_failed(exc)
+            return "off"
 
     def _ready(self) -> None:
         if not self._readied:
@@ -426,16 +601,27 @@ class Wrapped:
         meter, _, job, params = cur
         if meter.log is None:
             meter.run(job, **params)
-            if job != self.job:                                          # a run of another job: one of the host's agents
-                levers.declare_host(self.layout, self.tenant, self.job, run_job=job)
+            if job != self.job:                                          # a run of another job: one of the host's agents,
+                levers.declare_host(self.layout, self.tenant, job, run_job=job)   # its calls sized and reported as that job
         return meter
 
+    def _job(self) -> str:
+        cur = self._current.get()
+        return cur[2] if cur else self.job
+
     def run(self, job: Optional[str] = None, *, session: Optional[str] = None, **params) -> _Run:
-        """One log run (a host run: a task, a conversation); `session` groups the run's calls for the advisor."""
+        """One log run (a host run: a task, a conversation), named by its job: the calls inside it are that job's, so a
+        two-agent host opens `run("researcher")` and `run("writer")` and `recant cost` reports and sizes each apart
+        (`effort.researcher`, `reasoning.writer`). With no job, the wrapper's (`wrap(..., job=...)`, default "agent").
+        `session` groups the run's calls for the advisor."""
         return _Run(self, job or self.job, session, params)
 
     def close(self) -> None:
-        self.meter.close()
+        try:
+            self.meter.close()
+        except Exception as exc:                                         # noqa: BLE001 — never the host's error
+            from . import friction
+            friction.wrapper_failed(exc)
 
 
 def wrap(client, *, store, tenant: str, job: str = "agent", key_label: Optional[str] = None, apply_levers: bool = True,

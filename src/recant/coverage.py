@@ -18,6 +18,7 @@ from __future__ import annotations
 import atexit
 import hashlib
 import json
+import math
 import re
 import threading
 import time
@@ -116,6 +117,13 @@ def _enabled() -> bool:
 
 
 def _note(key: tuple, response: Any, streamed: bool) -> None:
+    try:
+        _count(key, response, streamed)
+    except Exception:                                                                  # noqa: BLE001 — counting never fails a call
+        pass
+
+
+def _count(key: tuple, response: Any, streamed: bool) -> None:
     usage = None
     if response is not None and not streamed:
         try:
@@ -132,9 +140,9 @@ def _note(key: tuple, response: Any, streamed: bool) -> None:
 
 
 def _request_key(request: Any) -> Optional[tuple]:
-    if _through.get() or not _enabled():
-        return None
-    try:
+    try:                                                                               # inside the host's own HTTP
+        if _through.get() or not _enabled():                                           # call: nothing here may raise
+            return None
         try:
             body = request.content
         except Exception:                                                              # noqa: BLE001 — a streamed body
@@ -343,10 +351,10 @@ def line(s: Optional[dict], *, watched: bool = True) -> str:
     if not s["calls_unseen"]:
         return (f"coverage: Recant saw all {s['calls_seen']:,} model calls the watch could see in this process"
                 if watched else "coverage: not measured (the watch was not on); calls outside Recant are not visible")
-    pct = f"{s['share_calls']:.0%}"
-    cost = f", {s['share_usd']:.0%} of list-priced cost" if s.get("share_usd") is not None else ""
+    seen = pct(s["share_calls"])
+    cost = f", {pct(s['share_usd'])} of list-priced cost" if s.get("share_usd") is not None else ""
     shown = "; ".join(_where(u) for u in s["unseen"][:3]) + ("; …" if len(s["unseen"]) > 3 else "")
-    return f"coverage: Recant saw {pct} of model calls{cost} (unseen: {shown})"
+    return f"coverage: Recant saw {seen} of model calls{cost} (unseen: {shown})"
 
 
 def verdict_qualifier(s: Optional[dict]) -> tuple[Optional[str], bool]:
@@ -448,21 +456,31 @@ def reconcile(usage: list[dict], calls: list[dict], *, price: Optional[Callable[
             "by_model": models, "by_provider": prov}
 
 
+def pct(x: float) -> str:
+    """A share as a percentage that never reads 100% while some of it is missing: 0.998 is 99.8%, not 100%."""
+    if x < 1 and round(x * 100) >= 100:
+        return f"{math.floor(x * 1000) / 10:.1f}%"
+    return f"{x:.0%}"
+
+
 def render_reconcile(r: dict) -> str:
     out = [f"coverage against your own totals, {r['window'][0]} to {r['window'][1]}: {r['runs']} runs reported"
            if r.get("window") else "coverage against your own totals: no runs in the file"]
     if r.get("share_tokens") is not None:
-        cost = (f", {r['share_usd']:.0%} of the list-priced cost (${r['usd_seen']:,.2f} of ${r['usd_list_priced']:,.2f}"
-                + (f"; unpriced: {', '.join(r['unpriced_models'])}" if r["unpriced_models"] else "") + ")") \
+        by = {m["model"]: m for m in r["by_model"]}
+        left = [f"{m} ({by[m]['tokens']:,} tokens, {pct(by[m]['share_tokens'])} seen)" if m in by and by[m].get("share_tokens") is not None
+                else m for m in r["unpriced_models"]]
+        cost = (f", {pct(r['share_usd'])} of the list-priced cost (${r['usd_seen']:,.2f} of ${r['usd_list_priced']:,.2f}"
+                + (f"; unpriced, so left out of the cost share: {', '.join(left)}" if left else "") + ")") \
             if r.get("share_usd") is not None else ""
-        out.append(f"Recant saw {r['share_tokens']:.0%} of the tokens ({r['tokens_seen']:,} of {r['tokens']:,}){cost}")
+        out.append(f"Recant saw {pct(r['share_tokens'])} of the tokens ({r['tokens_seen']:,} of {r['tokens']:,}){cost}")
     out.append("by model (runs reported; calls Recant metered on those days; tokens; share seen; list-priced):")
     for m in r["by_model"]:
         via = f" via {m['route']}" if m["route"] else ""
         usd = f"${m['usd_list']:,.2f}" if m["usd_list"] is not None else "unpriced"
         sub = f", {m['runs_subscription']} on a subscription" if m["runs_subscription"] else ""
         out.append(f"  {m['model']} ({m['provider']}{via}): {m['runs']} runs{sub}; {m['calls_metered']} calls metered; "
-                   f"{m['tokens']:,} tokens; {m['share_tokens']:.0%} seen; {usd}" if m["share_tokens"] is not None else
+                   f"{m['tokens']:,} tokens; {pct(m['share_tokens'])} seen; {usd}" if m["share_tokens"] is not None else
                    f"  {m['model']} ({m['provider']}{via}): {m['runs']} runs{sub}; no tokens reported")
     if r["runs_subscription"]:
         out.append(f"subscription: {r['runs_subscription']} runs were billed to a subscription (cost 0, real tokens): most "

@@ -29,11 +29,11 @@ pip install "recant[anthropic]"
 Or from GitHub, pinned to a tag:
 
 ```
-pip install "recant[anthropic] @ git+https://github.com/recant-memory/recant@v0.3.1"
+pip install "recant[anthropic] @ git+https://github.com/recant-memory/recant@v0.3.2"
 ```
 
-`recant --version` prints the version and, for an install from GitHub or a source checkout, the commit; every report
-carries both (the commit reads "unknown" for an install from PyPI).
+`recant --version` prints the version and, where the install records it, the commit (`install record` from GitHub,
+`source checkout` from a clone); an install from PyPI says the commit is not recorded. Every report carries both.
 `[anthropic]` adds the Anthropic SDK, which `recant.wrap` and the reference client use; leave it off if your agent
 uses its own client. From a source checkout: `pip install "./recant[anthropic]"`, and `pip install "./recant[test]"`
 then `pytest recant` runs the tests. Python 3.11+. Dependencies: pydantic, pyyaml, python-ulid.
@@ -55,6 +55,18 @@ client = recant.wrap(anthropic.Anthropic(), store="store", tenant="demo")
 with client.run("agent", session="task-1"):           # one run per task or conversation
     r = client.messages.create(model="claude-sonnet-5-5", max_tokens=300, system=SYSTEM, messages=msgs)
 ```
+
+`run`'s first argument is the job: the calls inside it are reported, and their levers sized and opted in, under that
+name. A multi-agent host names each agent: `with client.run("researcher", session=task_id):` around the researcher's
+calls and `client.run("writer", ...)` around the writer's, on one wrapped client or several (wrap each client you have,
+`Anthropic` and `AsyncAnthropic` alike, with the same store and tenant). A call outside any run is wrap's own job
+(`recant.wrap(..., job=...)`, default "agent"). A tool loop can put the response's content blocks back in `messages`
+as the SDK returns them (`{"role": "assistant", "content": r.content}`); the wrapper sends them as the SDK would. A
+request holding anything but plain dicts, lists, scalars and the SDK's own models (an iterator, a tuple, a set, a file,
+an omission sentinel) is sent as your own objects, untouched, with no lever applied to it. If
+Recant's own code fails on a call (preparing it, reading its response or stream, opening or closing its run, reading
+the switch), the call goes out as you built it, you get the response, and the failure is counted in the friction log;
+the coverage watch never fails an HTTP request. `recant.wrap(...)` itself raises on a store it cannot create.
 
 Then, after a few dozen runs:
 
@@ -114,8 +126,25 @@ meter.close()
 ```
 
 `levers.apply` takes and returns an Anthropic-shaped request; other providers' shapes wait until a host needs them.
-Prices default to the library's dated list prices for the model (`--prices` takes your own table, and `recant cost`
-warns when the list is stale).
+
+**Your own prices.** Prices default to the library's dated list prices (the vendor's page, read 2026-11-05):
+Fable 5.1, Mythos 5.1, Fable 5, Opus 5.5, Opus 5, Opus 4.8, 4.7 and 4.6, Sonnet 5.5, Sonnet 5, Sonnet 4.6, and Haiku
+5.5 (its two cards) and 4.5, by model ID (`recant.costshape.LIST_PRICES`); `recant cost` warns when the list is 90 days
+old. A model with no
+price is reported in tokens only, and `recant bench` names any it saw in the first task before it runs the rest. `--prices
+prices.json` takes your own table, row by row over the list: one JSON object keyed by model ID, each row in USD per
+million tokens, every field but `input` and `output` optional:
+
+```json
+{"my-model": {"input": 1.0, "output": 5.0, "cache_read": 0.10, "cache_write": 1.25, "cache_write_long": 2.0, "batch_factor": 0.5},
+ "claude-haiku-5-5": {"input": 0.10, "output": 0.50, "cache_read": 0.01, "cache_write": 0.125,
+                      "above": 100000, "over": {"input": 0.50, "output": 2.50, "cache_read": 0.05, "cache_write": 0.625}}}
+```
+
+`cache_read` and `cache_write` default to the input price (no discount assumed), `cache_write_long` (the 1-hour write)
+to `cache_write`, `batch_factor` to 1. `above` and `over` are a second card for a request whose prompt (uncached,
+cache reads and cache writes together) is over `above` tokens. `recant cost --json` prints each priced model's row in
+this format.
 
 ## What Recant can't see
 
@@ -127,15 +156,17 @@ calls (unseen: 41 calls to openrouter.ai, model glm-latest)".
   off, and `recant off` stops it counting). It counts requests to known model-API hosts that did not go through Recant:
   Anthropic, OpenAI, OpenRouter, Gemini and Vertex, Bedrock, Azure OpenAI, Mistral, Groq, Together, Fireworks, DeepSeek,
   xAI and Z.ai (the list is `recant/known_hosts.py`, one line a host). It keeps counts only: the host, the provider, the
-  model the request names, how many requests, and the usage numbers a non-streamed response reports. A POST to any
+  model the request names, how many requests, and the usage numbers a non-streamed response reports. `recant cost`
+  names them on its Coverage line ("unseen: 3 calls to api.openai.com, model gpt-4o-mini"). A POST to any
   other host whose body looks like a model call is counted as `other`, with the domain hashed. It hooks the HTTP library
   the SDKs share (httpx, or httpx2), so it does not see a client built on another one (boto3's Bedrock client,
   `requests`), nor subprocesses such as Claude Code.
 - **Against your own totals.** `recant coverage --usage runs.jsonl --store store --tenant demo` matches your own
-  per-run log (JSON lines: `ts`, `model`, `tokens_in`, `tokens_out`, `cache_read`, `cache_write`, optional `billed`:
-  `api_key` or `subscription`) against what Recant metered on the same days, by model and provider: tokens and
-  list-priced cost reported, and the share Recant saw. A usage file has no request ids, so runs are not matched one by
-  one. `recant.billing` does the same against a provider's own usage report when you supply a source for it
+  per-run log (JSON lines: `ts`, an ISO time with its offset; `model`; `tokens_in`, the uncached input, as the
+  Anthropic SDK's `input_tokens` counts it, cache reads and writes apart; `tokens_out`; `cache_read`; `cache_write`;
+  optional `billed`: `api_key` or `subscription`; other fields are ignored) against what Recant metered on the same days,
+  by model and provider: tokens and list-priced cost reported, and the share Recant saw. A line can be a call, a task or
+  a day: a usage file has no request ids, so lines are not matched one by one, only summed by day and model. `recant.billing` does the same against a provider's own usage report when you supply a source for it
   (`BillingSource`), and `recant cost` then lists traffic billed but never metered.
 - **In a bench.** Below 90% of calls or of list-priced cost, the verdict is qualified ("this result covers only <share> of your
   traffic; the rest went to <host>"). Below 50%, it gives no overall saving, only the covered part's.
@@ -269,22 +300,32 @@ Three commands measure Recant on your own agent, against not using it, and send 
 recant bench --tasks tasks.jsonl --run mypkg.agent:run_task --grade mypkg.agent:grade [--n 40] [--calibrate 10]
 ```
 
-- You write `run_task(task, client) -> result`, sync or async, making every model call through `client` (pass the same
-  client to every agent of a multi-agent host), and optionally `grade(task, result) -> bool | float`. Without a grader
-  the report shows cost and latency and says quality was not measured. `tasks.jsonl` is one task per line, any JSON.
-- It prices the run from the first task and asks before going on (`--yes` skips the question; `--estimate` stops there).
+- You write `run_task(task, client) -> result`, making every model call through `client` (pass the same client to
+  every agent of a multi-agent host, and name each agent's calls with `client.run("<agent>")`), and optionally
+  `grade(task, result) -> bool | float`. Without a grader the report shows cost and latency and says quality was not
+  measured. `tasks.jsonl` is one task per line, any JSON.
+- `client` is a wrapped `anthropic.AsyncAnthropic` when `run_task` is `async def`, a wrapped `anthropic.Anthropic`
+  otherwise (`--client mypkg:make_client` builds your own raw client instead). The bench hands one client, so a host
+  whose agents use both is benched on one: with an async `run_task`, the sync agent awaits its calls on the async client
+  (`await client.messages.create(...)`). The report's header says which (`client_mode`).
+- It prices the run from the first task and asks before going on (`--yes` skips the question; `--estimate` stops there),
+  and prints a line per task run as it goes.
   The first `--calibrate` tasks run without Recant and size the levers; the predictions are written to
   `predictions.json` and hashed before any compared task runs, and a changed file fails the report.
-- Every other task runs twice, without Recant (arm A: the raw client, metered from the response only) and with it
-  (arm B: `--mode safe`, the safe levers), the order alternating task by task. Each arm has its own cache salt (a line of
+- Every other task runs twice, without Recant (arm A: your request as built, plus the arm's cache salt; Recant only reads the
+  response, so its own time per call is reported for arm A too) and with it (arm B: `--mode safe`, the safe levers), the order
+  alternating task by task. The calibration tasks run as arm C, without Recant, in their own store. Each arm has its own cache salt (a line of
   the same length at the start of the system prompt, so no arm reads another's prompt cache) and its own fresh store.
   A task's pass or fail is your grader's; a task whose `run_task` raised counts as failed in its arm and stays in the
   comparison. A failed call counts its billed cost and is reported in its arm; if your code retries it and the task
   finishes, the task is not failed for it.
 - The report: cost per task and per passed task with 95% paired intervals (each arm's cold first task shown apart),
   tokens by class, quality (held means no observed loss and the 95% interval no worse than −3 points), latency per
-  call and per task, time to first token, Recant's own time per call, each lever's realized saving against its frozen
-  prediction (met when within a quarter), failures and equivalence per arm, and plain verdict lines.
+  call and per task (a task's time includes your own timeouts and retries), time to first token, Recant's own time per
+  call, each lever's realized saving against its frozen prediction (met when within a quarter), failures and
+  equivalence per arm, and plain verdict lines. What is frozen is each lever's share of the bill; its dollars, and the
+  cost per task it predicts, are at the report's prices, so `recant bench --out DIR --report --prices prices.json`
+  restates both sides of every prediction at your table.
 - `--arm-a safe --arm-b safe` is an A/A run: both arms write caches, each under its own salt, and the difference's
   interval should contain zero. `--arm-a safe --arm-b safe+reasoning.agent` measures one your-call lever against the
   safe set alone. An existing `--out` directory resumes, counting only the attempt that finished each task; a different
@@ -297,7 +338,7 @@ recant bench --tasks tasks.jsonl --run mypkg.agent:run_task --grade mypkg.agent:
 **Memory on your own sessions: `recant eval memory`.**
 
 ```
-recant eval memory --sessions sessions.jsonl --make-questions          # drafts questions.jsonl: read and edit it
+recant eval memory --sessions sessions.jsonl --make-questions          # drafts ./questions.jsonl: read and edit it
 recant eval memory --sessions sessions.jsonl --questions questions.jsonl
 ```
 
@@ -305,21 +346,33 @@ recant eval memory --sessions sessions.jsonl --questions questions.jsonl
   or `--load mypkg.export:load_sessions` returning the same list.
 - The drafted questions are recall (a fact stated earlier, quoted from the person's own turn), update (only the newest
   value is right) and absent (nothing says; the right answer is "I don't know"). A question whose quote is not the
-  person's own words in the session it names is dropped. The file is hashed when scoring starts.
+  person's own words in the session it names is dropped. `--questions` names the file (default `./questions.jsonl`);
+  the drafting calls are metered under `--out` (default `eval/<UTC stamp>/`). The file is hashed when scoring starts.
+- Edit the keys before scoring: a recall or update answer is right when its `ANSWER:` line holds every word of the key
+  (or, beside it, the same date or amount in another format), so a key is the fewest words that identify the value:
+  `Juniper`, not `the Juniper account`. The drafter asks only about the person's own turns, never a tool's result, so
+  facts found by tools are not tested here (see Known limits for why that matters to memory v2).
 - Four arms answer every question: none, carried history (the ceiling), managed notes, memory v2. The report gives
   accuracy per arm and per kind with 95% intervals, each arm against carried history, cost per question and per correct
-  answer with the write path, tokens, latency, notes size per scope against the 95k switch point, and what the
-  evidence check refused. Scoring is mechanical: the answer's words on the reply's `ANSWER:` line.
+  answer with the write path, the total spent, tokens, latency (the answer call's p50 and p95, Recant's own time per
+  call), notes size per scope against the 95k switch point, and what the evidence check refused. The verdict leads with
+  each arm's words-only score. Scoring is mechanical: the answer's words on the reply's `ANSWER:` line. An absent
+  question scores the abstention, the same in every arm that does not invent an answer.
 
 **Tell us: `recant feedback`.** Asks six optional questions (two minutes), prints the whole bundle and writes
 `recant-feedback-<date>.zip` on your yes: the reports' numbers, versions, OS, the features you used, error classes and
-counts, and your setup friction (every `recant` command logs, locally, when it ran and how it failed). It never holds
-prompts, replies, tool data, notes, questions, keys, paths, hostnames or names: every string passes an allow-list.
-Recant sends nothing; attach the file to a new issue on the repository.
+counts, the coverage of the store you name (`--store`, `--tenant`) by provider and public model, and your setup
+friction (every `recant` command, and any failure of Recant's own code inside a wrapped call, logs locally to
+`~/.recant/friction.jsonl`, or `$RECANT_HOME/friction.jsonl`). Every string Recant writes into it passes an
+allow-list: no prompts, replies, tool data, notes, questions, keys, paths or names, and no hostname but a known model
+API's (an unknown host is hashed). Your answers to the six questions are not filtered: they go in as you typed them,
+shown to you with the rest before anything is written. Recant
+sends nothing; attach the file to a new issue on the repository.
 
 **One switch: `recant off`.** `recant off --store DIR` (or `RECANT=off`) makes the wrapper a pure pass-through from the
 next call: your request byte for byte, nothing written. `recant off --meter` meters and changes nothing on the request;
-`recant on` reverses it; `recant status` says which is in force.
+`recant on` reverses it; `recant status` says which is in force. The switch is a file in the store
+(`recant.switch.json`); `RECANT=off`, `meter` or `on` in the environment overrides it for that process.
 
 ## Your model client
 
@@ -382,6 +435,7 @@ evidence is the agent's own failed call, its retries, or the agent's own account
   pairs; `CHANGELOG.md`, 0.2.x) it cut reasoning from 277 to 23 tokens a task and cost +3.1% a task (95% −0.6% to +6.7%), with quality −1.3
   points (95% −7.3 to +4.7): it stays off for work like that.
 - **Notes mode is not in `recant bench` yet.** The wrapper does not carry managed notes, so there is no notes arm.
+- **One client per bench.** A host whose agents use a sync and an async client is benched on one of them (above).
 - **One provider.** The wrapper and the levers are Anthropic's. A second provider's wrapper is built when coverage
   reports show a host relying on that provider for meaningful traffic: a share of a real user's bill large enough to
   change a bench verdict, not a guess. `recant feedback` carries the coverage counts by provider and public model name

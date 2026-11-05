@@ -51,7 +51,7 @@ def test_the_bundle_passes_the_allow_list_and_holds_nothing_from_the_runs(setup,
     p = feedback.run(bench_dirs=[tmp / "bench" / "r1"], eval_dirs=[], out_dir=tmp, ask=lambda q: next(answers), say=said.append)
     bundle = json.loads(zipfile.ZipFile(p).read("bundle.json"))
     assert bundle["form"]["had_to_read_code_or_guess"] == "the --run hook's signature"
-    assert bundle["reports"][0]["report"]["cost"]["per_task"]["B"] > 0 and bundle["features"]["clients"] == ["sync"]
+    assert bundle["reports"][0]["report"]["cost"]["per_task"]["B"] > 0 and bundle["features"]["bench_clients"] == ["sync"]
     form = bundle.pop("form")
     bad = [(path, s) for path, s in strings(bundle)                            # keys: Recant's field names; values: their field's rule
            if not (path[-1:] == ("<key>",) and (s in feedback.FIELDS or feedback.error_name(s) == s))

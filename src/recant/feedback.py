@@ -31,23 +31,23 @@ FIELDS = frozenset("""
 A B C P absent accepted accuracy against_history already_batched_calls answer_call answers_usd arm arms as_measured
 attempts background_jobs batch bench_arms bill_usd both_succeeded break_cost break_tokens bundle by_kind cache_lifetime
 cache_read cache_write calibration_tasks calls calls_max calls_median calls_per_task change_to_bill change_to_bill_at_most
-client_mode clients commands commit commit_from config_changes config_hash correct correct_words_only accuracy_words_only interval_words_only cost cost_usd delta difference
+client_mode clients bench_clients commands commit commit_from config_changes config_hash correct correct_words_only accuracy_words_only interval_words_only cost cost_usd delta difference
 discarded discarded_usd entries equivalence equivalent errors estimate estimated_usd failed_answers failed_calls
 failed_calls_usd failed_commands failed_tasks failures features first_command_ts first_report_ts first_task_usd friction
 gaps grader growth_per_call_median header held help_calls history id input input_per_mtok interval jobs kind latency
 levers machine memory_measured memory_served_median memory_v2 met minutes_to_first_report mixed_versions model models n
-net none not_equivalent notes notes_mode opted_in order_seed os output output_per_call_median output_per_mtok over_60_min
+net none not_equivalent notes eval_notes_arm opted_in order_seed os output output_per_call_median output_per_mtok over_60_min
 over_switch_point p50 p95 paired_difference_per_task paired_task_difference_s pairs pairs_with_a_failure pass_rate
 per_call per_correct_usd per_passed_task_relative per_question_usd per_task predicted_usd predictions
-predictions_anchored_in predictions_sha256 price_tags priced prices python quality questions questions_sha256 ratio
+predictions_anchored_in predictions_sha256 predicted_usd_at_freeze price_tags priced prices python quality questions questions_sha256 ratio
 read_x realized_usd reasoning reasoning_share_of_output recall recant recant_overhead refused refused_reasons relative report
 relative_interval remaining_calls_at rent_added rent_start reports retries run_id runs salts save saves_usd scopes scoring
 seconds sessions sessions_carried setup shape share share_predicted source split start_context_median start_read
 start_write store_copied store_from_copy streaming tasks_paired tasks_run text tokens tokens_est tokens_per_scope
-total_spend_usd ttft uncached under_5_min unpriced unpriced_calls update usd values verdict version warm_start_share warnings
+total_spend_usd ttft uncached under_5_min unpriced unpriced_calls unpriced_models update usd values verdict version warm_start_share warnings
 without_first_task write_added write_on_request_path write_path_s write_path_usd write_x written 5_to_60_min
 coverage calls_seen calls_unseen share_calls usd_seen usd_unseen share_usd unseen_unpriced watched unseen provider host
-requests with_usage usd_list usage
+requests with_usage usd_list usage wrapper_errors state row batch_factor cache_write_long above over
 5 10 25 50 100
 """.split()) | {"10% fewer calls", "10% smaller start context", "10% less added per call", "10% less output"}
 LISTED_BY_VALUE = frozenset({"scopes", "tokens_per_scope", "refused_reasons", "jobs", "opted_in", "errors", "prices"})
@@ -68,10 +68,12 @@ LEVERS = frozenset({"advice.trim_tool_output", "breakpoint.add", "fix.duplicate_
                     "memory.core_budget", "memory.slice_budget", "memory.memory_budget", "cost per task"})
 _BY_JOB = re.compile(r"^(batch|effort|reasoning|fix\.output_cap)\.(.+)$")
 _BY_KEY = re.compile(r"^(fix\.metered_not_billed|fix\.unmetered)\.(.+)$")
-ENUMS = {"commit_from": {"source checkout", "install record", "source checkout, uncommitted changes", "unknown"},
+ENUMS = {"commit_from": {"source checkout", "install record", "release build", "source checkout, uncommitted changes", "unknown"},
          "kind": {"safe", "your_call", "applied", "bench", "eval_memory", "fix_cause", "advice", "finding"},
+         "state": {"applied", "available", "needs_evidence", "reverted", "finding", "host_advice", "known", "no_slack",
+                   "not_worth_building", "checked", "opted_in"},
          "os": {"Darwin", "Linux", "Windows"}, "machine": {"arm64", "x86_64", "AMD64", "aarch64"},
-         "client_mode": {"sync", "async"}, "clients": {"sync", "async"}, "arm": {"A", "B"}, "bundle": {"recant-feedback"},
+         "client_mode": {"sync", "async"}, "bench_clients": {"sync", "async"}, "arm": {"A", "B"}, "bundle": {"recant-feedback"},
          "arms": {"none", "history", "notes", "memory_v2"}, "scoring": {"mechanical: the ANSWER line"},
          "verdict": {"held", "loss observed", "interval too wide"}, "store_copied": {"tenants", "versions", "machinery"},
          "prices": {"your table"}, "predictions_anchored_in": {"the manifest and the friction log",
@@ -99,6 +101,7 @@ def _rules():
             "model": lambda s: s if _MODEL.match(s) or _PUBLIC_MODEL.match(s) else None,
             "provider": lambda s: s if s in known_hosts.PROVIDERS or s == "none" else None,
             "host": lambda s: s if _OTHER_HOST.match(s) or s == "none" or known_hosts.provider_of_host(s) else None, "models": lambda s: s if _MODEL.match(s) else None,
+            "unpriced_models": lambda s: s if _MODEL.match(s) or _PUBLIC_MODEL.match(s) else None,
             "written": lambda s: s if _DATE.match(s) else None, "run_id": lambda s: s if _RUN_ID.match(s) else None,
             "A": lambda s: s if _ARM.match(s) else None, "B": lambda s: s if _ARM.match(s) else None,
             "bench_arms": lambda s: s if _ARM.match(s) else None, "id": lever_id,
@@ -126,7 +129,7 @@ KNOWN_ERRORS = _known_errors()
 
 def error_name(s: str) -> str:
     """An error class (optionally `grade:` or `… in recant.<function>`) as the bundle may hold it."""
-    m = re.match(r"^(grade:)?([A-Za-z_][A-Za-z0-9_]*)( in (recant(\.[a-z_][a-z0-9_]*)+|unknown))?$", s or "")
+    m = re.match(r"^(grade:)?([A-Za-z_][A-Za-z0-9_]*)( in (recant(\.([a-z_][a-z0-9_]*|<[a-z]+>))+|unknown))?$", s or "")
     if not m:
         return "HostError"
     return (m.group(1) or "") + (m.group(2) if m.group(2) in KNOWN_ERRORS else "HostError") + (m.group(3) or "")
@@ -159,7 +162,7 @@ def scrub(x, *, field: Optional[str] = None, dropped: Optional[list] = None):
     if isinstance(x, (list, tuple)):
         return [scrub(v, field=field, dropped=dropped) for v in x]
     if isinstance(x, dict):
-        if field == "errors":
+        if field in ("errors", "wrapper_errors"):
             merged: dict = {}
             for k, v in x.items():
                 k2 = error_name(str(k))
@@ -190,9 +193,9 @@ def _reports(dirs: list[Path]) -> list[dict]:
 
 
 def features(reports: list[dict]) -> dict:
-    f = {"clients": sorted({r["report"].get("header", {}).get("client_mode") for r in reports} - {None}),
+    f = {"bench_clients": sorted({r["report"].get("header", {}).get("client_mode") for r in reports} - {None}),
          "streaming": any(((r["report"].get("latency") or {}).get(a) or {}).get("ttft", {}).get("n", 0) for r in reports for a in "AB"),
-         "notes_mode": any("notes" in (r["report"].get("header", {}).get("arms") or []) for r in reports),
+         "eval_notes_arm": any("notes" in (r["report"].get("header", {}).get("arms") or []) for r in reports),
          "bench_arms": sorted({v for r in reports for v in ((r["report"].get("header", {}).get("arms") or {}).values()
                                                          if isinstance(r["report"].get("header", {}).get("arms"), dict) else [])})}
     return f
@@ -222,7 +225,12 @@ QUESTIONS = [
 
 def ask_form(ask: Callable = input, say: Callable = print) -> dict:
     s = friction.summary() or {}
-    pre = {"minutes_to_first_report": s.get("minutes_to_first_report"), "errors_hit": ", ".join(f"{k} ×{v}" for k, v in (s.get("errors") or {}).items())}
+    errs: dict = {}
+    for k, v in (s.get("errors") or {}).items():
+        errs[error_name(k)] = errs.get(error_name(k), 0) + v
+    hit = [f"{k} ×{v}" for k, v in errs.items()]
+    hit += [f"{error_name(k)} ×{v} inside a wrapped call" for k, v in (s.get("wrapper_errors") or {}).items()]
+    pre = {"minutes_to_first_report": s.get("minutes_to_first_report"), "errors_hit": ", ".join(hit)}
     say("Six questions, about two minutes; every answer is optional (Enter skips; a pre-filled answer is kept on Enter).")
     out = {}
     for key, q in QUESTIONS:

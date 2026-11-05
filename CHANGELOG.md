@@ -4,6 +4,57 @@ What changed in each version, and the measurements behind the numbers the README
 comments use. Each measurement says what it was run on; none of it is a promise about your traffic. Measure your own
 with `recant bench` and `recant eval memory`.
 
+## 0.3.2
+
+From an outside developer's first run of the whole kit, on their own two-agent app (a streamed async researcher on
+Sonnet 5.5 with tools, a sync writer on Haiku 5.5; 40 tasks; November 2026). Each item is something they hit.
+
+- **The wrapper takes a tool loop as the SDK writes it.** A request whose `messages` hold the SDK's own response
+  blocks (`{"role": "assistant", "content": r.content}`) raised `TypeError: Object of type ToolUseBlock is not JSON
+  serializable` on the second call of every wrapped tool loop. The wrapper now reads the request in the form the SDK
+  sends it: with no lever in force, the bytes on the wire are the raw SDK's, byte for byte, on all six call paths;
+  a request holding anything but plain data and the SDK's own models (an iterator, a tuple, a file, a sentinel) is sent
+  as the host's own objects, untouched and with no lever, so the SDK prepares it itself;
+  with a safe lever, they differ only in its cache markers (an opted-in effort or reasoning lever changes those settings,
+  as you asked).
+- **Recant's own failure does not reach your code.** If preparing a call, reading its response or a stream event,
+  recording it, opening or closing its run, or reading the switch fails inside Recant, the call goes out as you built
+  it, you get every event and the response, and the failure is counted in the friction log (`wrapper_errors`), which
+  the feedback form pre-fills. The coverage watch never fails an HTTP request.
+- **Prices.** The list (the vendor's pricing page, read 2026-11-05) gains Claude Haiku 5.5, with its two rate cards:
+  $0.10/$0.50 per million tokens up to a 100,000-token prompt, $0.50/$2.50 over it, the prompt counting cache reads and
+  writes, each request priced on its own. Without it a host using Haiku 5.5 got its calls left out of the bill and a
+  bench verdict of "cost not measured". The Sonnet 5.5 row read cache hits at 0.10x input ($0.20); the page reads
+  0.05x ($0.10). The list also gains Mythos 5.1, Fable 5, Opus 4.8, 4.7 and 4.6, and Sonnet 4.6 from the same page.
+  `recant bench` names any model the first task called that has no price, before it runs the rest.
+- **Your own price table** is documented (README, "Your own prices"), checked row by row with a one-line error naming
+  the model and the field (it printed a traceback), and may carry a second card (`above`, `over`). `recant cost --json`
+  prints each model's row in the same format.
+- **A run's name is its job.** `client.run("researcher")` and `client.run("writer")` are reported and sized apart
+  (`effort.writer`); an opted-in lever reaches only its own job. Before, every call was wrap's job, "agent".
+- **A bench report at other prices** restates both sides of every prediction: the frozen part is each lever's share,
+  and cost per task's base, the calibration's measured cost, is repriced at the report's table. Re-pricing after the
+  run had moved the per-task lines to 111% and 122% of prediction; on the same run they read 98% and 104%.
+- **Coverage.** A share below 100% never prints as 100% (99.8%); an unpriced model is named as left out of the cost
+  share. `recant feedback --store` now carries the store's unseen traffic by provider and public model; it carried only
+  the bench's and the eval's. Each lever in the bundle carries its state beside its kind.
+- **Reports say what they mean.** The bill's reasoning share and the job's (of output tokens) are labelled; "per task"
+  latency is per run; "tool calls 0" on a wrapped host says tools are not metered; the billing line says the
+  provider's bill is not reconciled; the levers header states what a weekly figure is scaled from.
+- **`recant eval memory`** leads with each arm's words-only score, adds a total spend line, the answer call's p95 and
+  Recant's own time per call. The question drafter writes the fewest words that identify a value as the key, and asks
+  only about facts the person stated: 6 of the developer's 12 misses were right answers scored against keys such as
+  holding a word the answer need not repeat (a project's name with "Project" in front). The scoring rule is unchanged.
+- **Progress.** `recant bench` prints a line per task run; `recant eval memory` says when it writes a scope and how many
+  answers are in. Each ran 18 to 27 minutes in silence.
+- **`--help`** says what each flag takes, and its default where it has one. `recant --version` from PyPI says in words that the commit is
+  not recorded; it printed `(unknown, unknown)`.
+
+## 0.3.1
+
+The first release on PyPI, published from the public repository by trusted publishing. The library's code is 0.3.0's,
+with internal references taken out of its comments; no behaviour changed.
+
 ## 0.3.0
 
 - **Coverage: what Recant can't see.**

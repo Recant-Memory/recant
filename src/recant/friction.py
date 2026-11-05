@@ -43,15 +43,30 @@ def started(argv: list) -> None:
     write("command", argv, flags=flags, config_change=_cmd(argv) in CONFIG_CMDS or bool(set(flags) & CONFIG_FLAGS))
 
 
+def _where(exc: BaseException) -> Optional[str]:
+    """The innermost Recant function the error passed through: `recant.wrap.__init__`."""
+    pkg = Path(__file__).resolve().parent                          # frames inside the installed package only, never
+    for fr in reversed(traceback.extract_tb(exc.__traceback__)):    # a host's own file in a folder named "recant"
+        try:
+            rel = Path(fr.filename).resolve().relative_to(pkg)
+        except (ValueError, OSError):
+            continue
+        return "recant." + ".".join(rel.with_suffix("").parts) + f".{fr.name}"
+    return None
+
+
 def failed(argv: list, exc: BaseException) -> None:
-    where = None
-    for fr in reversed(traceback.extract_tb(exc.__traceback__)):
-        parts = Path(fr.filename).parts
-        if "recant" in parts:
-            mod = ".".join(parts[len(parts) - 1 - parts[::-1].index("recant"):])[:-3]
-            where = f"{mod}.{fr.name}"
-            break
-    write("failed", argv, error=type(exc).__name__, where=where)
+    write("failed", argv, error=type(exc).__name__, where=_where(exc))
+
+
+def wrapper_failed(exc: BaseException) -> None:
+    """Recant's own code failed inside a wrapped call, in the host's process. The wrapper sent the host's request as
+    built and did not raise; this line is how the failure is still seen (the summary's `wrapper_errors`). It never
+    raises itself: a failure to report is dropped, never the host's error."""
+    try:
+        write("wrapper_failed", error=type(exc).__name__, where=_where(exc))
+    except Exception:                                               # noqa: BLE001
+        pass
 
 
 def finished(argv: list, code: int = 0) -> None:
@@ -84,8 +99,12 @@ def summary() -> Optional[dict]:
     for f in fails:
         k = f"{f['error']} in {f.get('where') or 'unknown'}"
         by[k] = by.get(k, 0) + 1
+    wrapper: dict = {}
+    for f in (r for r in rows if r["event"] == "wrapper_failed"):
+        k = f"{f['error']} in {f.get('where') or 'unknown'}"
+        wrapper[k] = wrapper.get(k, 0) + 1
     return {"commands": len(cmds), "first_command_ts": first, "first_report_ts": reports[0]["ts"] if reports else None,
             "minutes_to_first_report": round((reports[0]["ts"] - first) / 60, 1) if reports else None,
-            "failed_commands": len(fails), "errors": by, "retries": retries,
+            "failed_commands": len(fails), "errors": by, "wrapper_errors": wrapper, "retries": retries,
             "config_changes": sum(1 for c in cmds if c.get("config_change")),
             "help_calls": sum(1 for c in cmds if "--help" in c.get("flags", []) or "-h" in c.get("flags", []))}

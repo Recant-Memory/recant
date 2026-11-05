@@ -47,7 +47,7 @@ from typing import Any, Callable, Optional
 from . import costshape as cs, quality, switch
 from .log import read_run
 from .store import StoreLayout
-from .version import info as version_info
+from .version import describe, info as version_info
 from .wrap import wrap
 
 TENANT = "bench"
@@ -276,6 +276,7 @@ def _calibration_numbers(layout, rows: list, prices=None) -> dict:
     n = max(1, len(acc["by"]))
     usd, unpriced = _priced(acc["rep"], calls)
     return {"tasks": len(acc["by"]), "cost_per_task_usd": usd / n, "calls_per_task": len(calls) / n, "unpriced_calls": unpriced,
+            "calls": len(calls), "unpriced_models": sorted({c["model"] for c in calls if c["model"] not in acc["rep"].profiles}),
             "rep": _report(layout, prices, declared=True)}
 
 
@@ -404,12 +405,22 @@ def run(*, tasks_path: str, run_spec: str, grade_spec: Optional[str] = None, n: 
 
     lock = threading.Lock()
 
+    took: list = []
+
     def record(res):
         with lock:
             with results_p.open("a") as f:
                 f.write(json.dumps(res) + "\n")
             rows.append(res)
             done.add((res["task"], res["arm"]))
+            if man.get("confirmed") and man.get("estimate"):          # progress, once the spend is agreed
+                took.append(res["ended"] - res["started"])
+                total = man["estimate"]["tasks_run"]
+                n = len({(r["task"], r["arm"]) for r in rows if r["arm"] != "P"})
+                left = max(0, total - n) * (sum(took) / len(took)) / max(1, parallel)
+                what = res["error"] or ("passed" if res["score"] else "failed" if res["score"] is not None else "done")
+                say(f"[{n}/{total}] task {res['task']} arm {res['arm']}: {what}, {res['ended'] - res['started']:.1f} s; "
+                    f"about {left / 60:.0f} min left")
 
     if parallel > 1 and runner.is_async:
         raise SystemExit("--parallel runs sync agents on threads; an async run_task already runs its own work concurrently")
@@ -444,14 +455,20 @@ def run(*, tasks_path: str, run_spec: str, grade_spec: Optional[str] = None, n: 
     if man["estimate"] is None:
         if (0, probe.name) not in done:
             record(runner.one(probe, 0, tasks[0]))
-        first = _calibration_numbers(probe.layout, arm_rows(probe.name), prices)["cost_per_task_usd"]
+        nums = _calibration_numbers(probe.layout, arm_rows(probe.name), prices)
+        first = nums["cost_per_task_usd"]
         runs_left = calibrate + 2 * (len(tasks) - calibrate)
         man["estimate"] = {"first_task_usd": first, "tasks_run": runs_left + (0 if calibrate else 1),
-                           "estimated_usd": first * runs_left + (0 if calibrate else first)}
+                           "estimated_usd": first * runs_left + (0 if calibrate else first),
+                           "unpriced_calls": nums["unpriced_calls"], "calls": nums["calls"], "unpriced_models": nums["unpriced_models"]}
         save()
     est = man["estimate"]
     say(f"recant bench {run_id}: estimated spend ${est['estimated_usd']:.2f} ({est['tasks_run']} task runs at "
         f"${est['first_task_usd']:.4f}, the first task's cost)")
+    if est.get("unpriced_models"):
+        say(f"warning: {est['unpriced_calls']} of the first task's {est['calls']} calls are on models with no price "
+            f"({', '.join(est['unpriced_models'])}). The estimate leaves them out, and the verdict will read \"cost not "
+            f"measured\". Pass --prices with a row for each (README, \"Your own prices\").")
     if estimate_only:
         runner.close()
         return {"root": str(root), "estimate": est}
@@ -711,16 +728,28 @@ def build_report(root, prices=None) -> dict:
     out["equivalence"] = {name: {"equivalent": arms[name]["equivalent"], "not_equivalent": arms[name]["not_equivalent"]} for name in arms}
     out["opted_in"] = {name: arms[name]["opted_in_calls"] for name in arms}
     preds = []
+    # What is frozen is each lever's share of the bill. The dollars are at the report's prices: a lever's from its arm's
+    # calls, cost per task from the calibration's measured cost, repriced here, so predicted and realized always share
+    # one price table (a table passed to --report after the run moved one side and not the other before 0.3.2).
+    base_now = None
+    if (root / "calibration").exists() and pred.get("calibration"):
+        base_now = _calibration_numbers(StoreLayout(root / "calibration"), [r for r in results if r["arm"] == "C"],
+                                        prices)["cost_per_task_usd"]
     for name in arms:
         p = pred["arms"][name]
         for lv in arms[name]["levers"]:
             met = None if lv["ratio"] is None else abs(lv["ratio"] - 1) <= QUARTER
             preds.append({"arm": name, **lv, "met": met})
         if p.get("predicted_cost_per_task_usd") is not None:
+            frozen = p["predicted_cost_per_task_usd"]
+            if base_now is not None:
+                shares = sum(lv["share"] or 0 for lv in p["levers"])
+                predicted = base_now * (1 - shares)
+            else:
+                predicted = frozen
             realized_cost = mean([t["cost"] for t in arms[name]["tasks"]])
-            preds.append({"arm": name, "id": "cost per task", "predicted_usd": p["predicted_cost_per_task_usd"],
-                          "realized_usd": realized_cost, "ratio": realized_cost / p["predicted_cost_per_task_usd"]
-                          if p["predicted_cost_per_task_usd"] else None})
+            preds.append({"arm": name, "id": "cost per task", "predicted_usd": predicted, "predicted_usd_at_freeze": frozen,
+                          "realized_usd": realized_cost, "ratio": realized_cost / predicted if predicted else None})
     out["predictions"] = preds
     out["verdict"] = verdict_lines(out)
     from . import friction
@@ -820,7 +849,7 @@ def _f(x, fmt="{:.4f}"):
 def render(r: dict) -> str:
     h = r["header"]
     L = [f"# recant bench {h['run_id']}", "",
-         f"- Recant {h['recant']['version']} ({h['recant']['commit'][:12]}, {h['recant']['commit_from']})"
+         f"- Recant {describe(h['recant'])}"
          + (f"; MIXED VERSIONS: {h['mixed_versions']}" if h.get("mixed_versions") else ""),
          f"- config {h['config_hash']}; predictions sha256 {h['predictions_sha256']}",
          f"- models {', '.join(h['models']) or '—'}; prices: {h['prices']}",

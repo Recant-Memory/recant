@@ -24,7 +24,7 @@ from typing import Iterable, Optional
 from .toolloop import TOOL_LOOP_MIN, args_hash   # one definition with the runtime guard
 
 M = 1e-6
-LIST_PRICES_AS_OF = date(2026, 10, 9)
+LIST_PRICES_AS_OF = date(2026, 11, 5)
 STALE_AFTER_DAYS = 90
 
 
@@ -40,22 +40,51 @@ class Profile:
     short_ttl: float = 300.0
     long_ttl: float = 3600.0
     batch: float = 1.0
+    above: Optional[int] = None          # a model priced by prompt length: a request whose prompt is over this many
+    over: Optional["Profile"] = None     # tokens (uncached, cache reads and cache writes together) pays `over`'s prices
 
-    def bill(self, uncached=0, write=0, read=0, output=0, write_long=0):
+    @property
+    def wl(self) -> float:
+        """The long-lifetime write multiplier: `w_long`, else the short write's (a table's documented default)."""
+        return self.w_long if self.w_long is not None else self.w
+
+    def at(self, prompt) -> "Profile":
+        """The rate card a request with a prompt of this many tokens pays: each request is priced on its own."""
+        return self.over if (self.above is not None and self.over is not None and prompt > self.above) else self
+
+    def bill(self, uncached=0, write=0, read=0, output=0, write_long=0, *, prompt=None):
+        """One request's cost. Its card is chosen by its prompt, `uncached + write + read` unless `prompt` is given
+        (as when only part of a request is billed)."""
+        pf = self.at(uncached + write + read if prompt is None else prompt)
         long_ = min(write_long, write)
-        wl = self.w_long if self.w_long is not None else self.w
-        return self.p * (uncached + self.w * (write - long_) + wl * long_ + self.r * read) + self.po * output
+        wl = pf.w_long if pf.w_long is not None else pf.w
+        return pf.p * (uncached + pf.w * (write - long_) + wl * long_ + pf.r * read) + pf.po * output
+
+
+def _prompt(c) -> int:
+    """A metered call's prompt in tokens: what decides its rate card on a model priced by prompt length."""
+    return (c.get("uncached") or 0) + (c.get("cache_read") or 0) + (c.get("cache_write") or 0)
 
 
 # The library's default: list prices by model ID, dated. Vendor data, not any host's; a
-# consumer's table overrides it row by row. Rows from the vendor's price pages.
+# consumer's table overrides it row by row. Rows from the vendor's price page (platform.claude.com, pricing), read
+# 2026-11-05: cache reads are 0.05x input on Opus 5.5 and Sonnet 5.5, 0.025x on Fable 5.1, 0.1x elsewhere; 5-minute
+# writes 1.25x, 1-hour writes 2x; batch half price. Haiku 5.5 has two cards, split at a 100,000-token prompt.
 LIST_PRICES: dict[str, Profile] = {
     "claude-opus-5-5": Profile(p=4 * M, po=20 * M, w=1.25, r=0.05, w_long=2.0, batch=0.5),
     "claude-fable-5-1": Profile(p=10 * M, po=50 * M, w=1.25, r=0.025, w_long=2.0, batch=0.5),
+    "claude-mythos-5-1": Profile(p=10 * M, po=50 * M, w=1.25, r=0.025, w_long=2.0, batch=0.5),
+    "claude-fable-5": Profile(p=10 * M, po=50 * M, w=1.25, r=0.10, w_long=2.0, batch=0.5),
     "claude-sonnet-5": Profile(p=2 * M, po=10 * M, w=1.25, r=0.10, w_long=2.0, batch=0.5),
-    "claude-sonnet-5-5": Profile(p=2 * M, po=10 * M, w=1.25, r=0.10, w_long=2.0, batch=0.5),   # the current Sonnet; $2/$10, cache reads $0.20 (vendor price page, 2026-10-06)
+    "claude-sonnet-5-5": Profile(p=2 * M, po=10 * M, w=1.25, r=0.05, w_long=2.0, batch=0.5),   # $2/$10, cache reads $0.10 (0.05x; the row read $0.20 before 0.3.2)
     "claude-opus-5": Profile(p=5 * M, po=25 * M, w=1.25, r=0.10, w_long=2.0, batch=0.5),
+    "claude-opus-4-8": Profile(p=5 * M, po=25 * M, w=1.25, r=0.10, w_long=2.0, batch=0.5),
+    "claude-opus-4-7": Profile(p=5 * M, po=25 * M, w=1.25, r=0.10, w_long=2.0, batch=0.5),
+    "claude-opus-4-6": Profile(p=5 * M, po=25 * M, w=1.25, r=0.10, w_long=2.0, batch=0.5),
+    "claude-sonnet-4-6": Profile(p=3 * M, po=15 * M, w=1.25, r=0.10, w_long=2.0, batch=0.5),
     "claude-haiku-4-5": Profile(p=1 * M, po=5 * M, w=1.25, r=0.10, w_long=2.0, batch=0.5),
+    "claude-haiku-5-5": Profile(p=0.10 * M, po=0.50 * M, w=1.25, r=0.10, w_long=2.0, batch=0.5, above=100_000,
+                                over=Profile(p=0.50 * M, po=2.50 * M, w=1.25, r=0.10, w_long=2.0, batch=0.5)),
 }
 
 
@@ -75,8 +104,21 @@ def profile_from_prices(row) -> Profile:
     w = (row.cache_write if row.cache_write is not None else row.input) / row.input if row.input else 1.0
     r = (row.cache_read if row.cache_read is not None else row.input) / row.input if row.input else 1.0
     cwl = getattr(row, "cache_write_long", None)
+    over = getattr(row, "over", None)
     return Profile(p=p, po=row.output * M, w=w, r=r, w_long=(cwl / row.input) if (cwl is not None and row.input) else None,
-                   batch=getattr(row, "batch_factor", 1.0))
+                   batch=getattr(row, "batch_factor", 1.0), above=getattr(row, "above", None) if over is not None else None,
+                   over=profile_from_prices(over) if over is not None else None)
+
+
+def price_row(pf: Profile) -> dict:
+    """A Profile as a row of the `--prices` table (USD per million tokens), the format `recant.provider.Prices` reads."""
+    row = {"input": round(pf.p / M, 6), "output": round(pf.po / M, 6), "cache_read": round(pf.p * pf.r / M, 6),
+           "cache_write": round(pf.p * pf.w / M, 6), "batch_factor": pf.batch}
+    if pf.w_long is not None:
+        row["cache_write_long"] = round(pf.p * pf.w_long / M, 6)
+    if pf.above is not None and pf.over is not None:
+        row["above"], row["over"] = pf.above, price_row(pf.over)
+    return row
 
 
 @dataclass
@@ -181,10 +223,12 @@ def run_shape(r: Run, pf: Profile):
     out = defaultdict(float)
     X1 = r.X(0)
     prev_cached = None
+    base = pf
     for i, c in enumerate(r.calls):
+        pf = base.at(_prompt(c))                                     # each call on its own card
         wl = c.get("cache_write_long", 0)
         cost = pf.bill(c["uncached"], c["cache_write"], c["cache_read"], c["output"], wl)
-        write_cost = pf.bill(write=c["cache_write"], write_long=wl)
+        write_cost = pf.bill(write=c["cache_write"], write_long=wl, prompt=_prompt(c))
         out["cost"] += cost
         out["output"] += pf.po * c["output"]
         out["reasoning"] += pf.po * (c.get("reasoning") or 0)
@@ -210,8 +254,10 @@ def run_shape(r: Run, pf: Profile):
 
 
 def closed_form(pf: Profile, n, P, d, o, warm=0.0):
-    """Steady-growth run cost: the start context P (a fraction `warm` of it already cached), d added per call."""
+    """Steady-growth run cost: the start context P (a fraction `warm` of it already cached), d added per call. On a
+    model priced by prompt length, at the card of the run's mean context (a closed form cannot switch cards mid-run)."""
     n = max(1.0, n)
+    pf = pf.at(P + d * (n - 1) / 2)
     start = pf.p * P * (warm * pf.r + (1 - warm) * pf.w)
     return (start + pf.p * pf.r * P * (n - 1) + pf.p * d * (pf.w * (n - 1) + pf.r * (n - 1) * (n - 2) / 2)
             + pf.po * n * o)
@@ -291,9 +337,10 @@ def cache_lifetime(runs, profiles):
         carried = min(b.calls[0]["cache_write"], a.X(a.n - 1) + a.calls[-1]["output"])
         if carried <= 0:
             continue
+        pb, pa = pf.at(_prompt(b.calls[0])), pf.at(_prompt(a.calls[-1]))   # each request on its own card
         k += 1
-        save += pf.p * (pf.w - pf.r) * carried
-        cost += pf.p * (pf.w_long - pf.w) * a.calls[-1]["cache_write"]
+        save += pb.p * (pb.w - pb.r) * carried
+        cost += pa.p * (pa.wl - pa.w) * a.calls[-1]["cache_write"]
     return dict(runs=k, save=save, cost=cost, net=save - cost)
 
 
@@ -411,7 +458,8 @@ def shape(calls: list[dict], *, prices: Optional[dict] = None, run_meta: Optiona
         "batch": {"background_jobs": sorted(background_jobs), "cost_usd": bg, "already_batched_calls": already_batched,
                   "change_to_bill_at_most": (-bg * (1 - batch_factor) / C) if C else 0.0},
         "prices": {m: {"source": sources[m], **({"input_per_mtok": profiles[m].p / M, "output_per_mtok": profiles[m].po / M,
-                                                  "write_x": profiles[m].w, "read_x": profiles[m].r} if m in profiles else {})}
+                                                  "write_x": profiles[m].w, "read_x": profiles[m].r,
+                                                  "row": price_row(profiles[m])} if m in profiles else {})}
                    for m in sources},
         "unpriced": {"runs": len(unpriced), "tokens": sum(r.X(i) + r.calls[i]["output"] for r in unpriced for i in range(r.n))},
         "warnings": notes,
@@ -426,7 +474,7 @@ def render(s: dict, title: str = "host") -> str:
         lines.append(f"warning: {w}")
     if not s["runs"]:
         return "\n".join(lines + ["no metered calls in this window"])
-    lines.append(f"bill: output {sp['output']:.0%} (reasoning {sp['reasoning']:.0%}), start writes {sp['start_write']:.0%}, "
+    lines.append(f"bill: output {sp['output']:.0%} (reasoning {sp['reasoning']:.0%} of the bill), start writes {sp['start_write']:.0%}, "
                  f"rent on the start context {sp['rent_start'] + sp['start_read']:.0%}, writes of added content {sp['write_added']:.0%}, "
                  f"rent on added content {sp['rent_added']:.0%}, uncached {sp['uncached']:.0%}")
     lines.append(f"cache breaks: {s['break_tokens']:,.0f} tokens rewritten ({sp['break_cost']:.1%} of the bill)")
@@ -435,7 +483,7 @@ def render(s: dict, title: str = "host") -> str:
             if j["memory_served_median"] else ""
         lines.append(f"job {job}: {j['runs']} runs, calls median {j['calls_median']:.0f} (max {j['calls_max']}), start context "
                      f"{j['start_context_median']:,.0f}, growth {j['growth_per_call_median']:,.0f}/call, output "
-                     f"{j['output_per_call_median']:,.0f}/call (reasoning {j['reasoning_share_of_output']:.0%}){mem}")
+                     f"{j['output_per_call_median']:,.0f}/call ({j['reasoning_share_of_output']:.0%} of it reasoning){mem}")
     if s["price_tags"]:
         lines.append("price tags: " + ", ".join(f"{k} {v:+.1%}" for k, v in s["price_tags"].items()))
     g = s["gaps"]
@@ -626,7 +674,8 @@ class Report:
         out.append("leaks found:" if leaks else "leaks found: none")
         out += items(leaks)
         rest = [lv for lv in by["cost"] if lv.kind != "fix_cause"]
-        out.append("levers:" if rest else "levers: none sized in this window")
+        out.append("levers (dollars a week at the rate of the calls each is priced on: its job's calls since their settings last "
+                   "changed, a span under a day counted as a day):" if rest else "levers: none sized in this window")
         out += items(sorted(rest, key=lambda lv: ({"automatic": 0, "opt-in": 1}.get(label_of(lv), 2), -(lv.saves_usd or 0))))
         checks = [e for e in (ledger or []) if e.get("event") == "checked"]
         if checks:
@@ -664,7 +713,9 @@ class Report:
         out.append("\n== health ==")
         h = self.health()
         out.append(f"model calls {h['calls']}: failed {h['failed_calls']} (retried and recovered {h['retried']}), refusals "
-                   f"{h['refusals']}; tool calls {h['tool_calls']}: failed {h['failed_tool_calls']}"
+                   f"{h['refusals']}; "
+                   + (f"tool calls {h['tool_calls']}: failed {h['failed_tool_calls']}" if h["tool_calls"] else
+                      "tool calls: none metered (recant.wrap sees model calls only; record tools with Meter.tool)")
                    + (" (" + ", ".join(f"{k} {v}" for k, v in h["failed_tools"].items()) + ")" if h["failed_tools"] else ""))
         out += items(by["health"]) if by["health"] else ["  no loops, capped outputs, unmetered spend or unexpected traffic found"]
         known = [lv for lv in levers if section_of(lv) == "known"]
@@ -738,7 +789,7 @@ def render_latency(lat: dict) -> list[str]:
             return "not measured"
         return f"p50 {d['p50'] * scale:,.2f} {unit}, p95 {d['p95'] * scale:,.2f} {unit} ({d['n']})"
     wp = lat["write_path"]
-    return [f"per call: {f(lat['call'])}; per task: {f(lat['task'])}",
+    return [f"per call: {f(lat['call'])}; per run (one run(...) block): {f(lat['task'])}",
             f"time to first token (streamed calls): {f(lat['ttft'])}",
             f"Recant's own time per call (network excluded): {f(lat['overhead'], 1000, 'ms')}",
             "write path: " + (f"{f(wp)}, off the request's path" if wp["n"] else "none in this window")]
@@ -936,6 +987,7 @@ def _ttl_cost(rep: Report, starts: list, ttl: str) -> float:
         pf = rep.profiles.get(s["model"])
         if pf is None:
             continue
+        pf = pf.at(s["X1"])
         w = pf.w_long if (ttl == "1h" and pf.w_long is not None) else pf.w
         out += pf.p * s["prefix"] * (pf.r if s["gap"] <= TTL_SECONDS[ttl] else w)
     return out
@@ -1035,6 +1087,7 @@ def lever_breakpoint_add(rep: Report) -> Optional[Lever]:
             if pf is None:
                 continue
             x = c["uncached"] + c["cache_read"] + c["cache_write"]
+            pf = pf.at(x)
             reused = prev_x if c.get("extends_previous") else (min(x, head.get(id(c), 0)) if i == 0 else 0)
             save += pf.p * (1 - pf.r) * reused
             cost += pf.p * (pf.w - 1) * max(0, x - reused)
@@ -1066,9 +1119,10 @@ def lever_postreply_write(rep: Report) -> Optional[Lever]:
         pf = rep.profiles.get(s["model"])
         if pf is None or pf.w_long is None:
             continue
+        pf = pf.at(s["X1"])
         follow = nxt.get(s["run"])
         h_after = _history(rep, follow[0]) if follow else _history(rep, s)
-        cost += pf.p * (pf.w_long * h_after + pf.r * s["prefix"])
+        cost += pf.p * (pf.wl * h_after + pf.r * s["prefix"])
         if follow and follow[1] <= 3600:
             h = _history(rep, follow[0])
             save += pf.p * pf.w * h                     # the next run no longer writes it ...
@@ -1149,10 +1203,11 @@ def lever_folds(rep: Report) -> Optional[Lever]:
     pf = next(iter(rep.profiles.values()), None)
     for f in rep.folds:
         removed = max(0, (f.get("tokens_before") or 0) - (f.get("tokens_after") or 0))
-        pays, m_star = fold_pays(pf, removed, f.get("tokens_after") or 0, f.get("cost_usd") or 0.0, f.get("remaining", 0)) if pf else (True, 0)
+        pays, m_star = fold_pays(pf.at(f.get("tokens_before") or 0), removed, f.get("tokens_after") or 0, f.get("cost_usd") or 0.0, f.get("remaining", 0)) if pf else (True, 0)
         if not pays:
             bad += 1
-            loss += pf.p * (pf.w - pf.r) * (f.get("tokens_after") or 0) + (f.get("cost_usd") or 0.0)
+            fp = pf.at(f.get("tokens_after") or 0)
+            loss += fp.p * (fp.w - fp.r) * (f.get("tokens_after") or 0) + (f.get("cost_usd") or 0.0)
     # a your-call lever: folding changes what the model sees, so it is gated on quality, never applied by
     # Recant; its size is shown with the evidence it needs
     return Lever("fold.window_only", "your_call", "agent", 0.0, loss * rep.per_week, None, False, state="needs_evidence",
@@ -1201,7 +1256,7 @@ def lever_reasoning(rep: Report, runs: Optional[set] = None) -> list[Lever]:
               and c["model"] not in rep.host.fixed_reasoning and c["model"] not in _cannot_turn_off()]
         if not cs:
             continue
-        usd = sum(rep.profiles[c["model"]].po * c["reasoning"] for c in cs)
+        usd = sum(rep.profiles[c["model"]].at(_prompt(c)).po * c["reasoning"] for c in cs)
         bill = rep.job_bill({job})
         out.append(Lever(f"reasoning.{job}", "your_call", job, sum(c["reasoning"] for c in cs) * rep.per_week, usd * rep.per_week,
                          usd / bill if bill else None, False, state="needs_evidence", action={"reasoning": "off"},
@@ -1240,6 +1295,7 @@ def lever_handoff(rep: Report, h: int = 300) -> Optional[Lever]:
         pf, r = rep.profiles.get(s["model"]), by_run.get(s["run"])
         if pf is None or r is None:
             continue
+        pf = pf.at(s["X1"])
         H = _history(rep, s)
         hs.append(H)
         n = r.n
@@ -1280,7 +1336,8 @@ def detect_segment_changes(rep: Report) -> Optional[Lever]:
             by_heuristic = not a and c["cache_read"] < 5000 and ctx > 10000 and c["seq"] == 0
             if moved or by_heuristic:
                 pf = rep.profiles.get(c["model"])
-                cost = pf.p * (pf.w - pf.r) * c["cache_write"] if pf else 0.0
+                cp = pf.at(_prompt(c)) if pf else None
+                cost = cp.p * (cp.w - cp.r) * c["cache_write"] if cp else 0.0
                 usd += cost
                 toks += c["cache_write"]
                 found.append({"session": c["session"], "at": moved[0] if moved else "system (no hashes)", "seconds": round(c["start"] - p["start"]),
@@ -1563,8 +1620,8 @@ def check(lever_id: str, rep: Report, entry: dict) -> dict:
     if lever_id == "breakpoint.add":                     # each call as measured, and as it would have cost uncached
         cs_ = [c for c in after.calls if c["job"] in _agent(after) and c["model"] in after.profiles]
         runs, calls = len({(c["run"], c.get("session")) for c in cs_}), len(cs_)
-        realized = sum(after.profiles[c["model"]].p * (c["uncached"] + c["cache_read"] + c["cache_write"])
-                       + after.profiles[c["model"]].po * c["output"] - after.cost(c) for c in cs_)
+        realized = sum(after.profiles[c["model"]].at(_prompt(c)).p * _prompt(c)            # the card the whole prompt
+                       + after.profiles[c["model"]].at(_prompt(c)).po * c["output"] - after.cost(c) for c in cs_)   # pays
     elif lever_id == "ttl.prefix":
         starts = _prefix_starts(after)
         runs, calls = len(starts), sum(1 for c in after.calls if c["job"] in _agent(after))
