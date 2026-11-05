@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+.venv/
+/build/
+/dist/
+.env
+.DS_Store
+# a store, a bench or an eval written at the top level while trying the examples (anchored: the package has its
+# own store/ and eval/ modules)
+/store/
+/bench/
+/eval/

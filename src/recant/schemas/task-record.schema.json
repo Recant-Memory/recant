@@ -1,0 +1,219 @@
+{
+  "$defs": {
+    "Actor": {
+      "additionalProperties": false,
+      "properties": {
+        "class": {
+          "enum": [
+            "principal",
+            "agent"
+          ],
+          "title": "Class",
+          "type": "string"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "class",
+        "id"
+      ],
+      "title": "Actor",
+      "type": "object"
+    },
+    "Anchor": {
+      "additionalProperties": false,
+      "properties": {
+        "channel": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Channel"
+        },
+        "episode": {
+          "title": "Episode",
+          "type": "string"
+        },
+        "message_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Message Id"
+        },
+        "quote": {
+          "title": "Quote",
+          "type": "string"
+        },
+        "timestamp": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Timestamp"
+        }
+      },
+      "required": [
+        "quote",
+        "episode"
+      ],
+      "title": "Anchor",
+      "type": "object"
+    },
+    "TaskNote": {
+      "additionalProperties": false,
+      "description": "A dated line on a task: what is still pending, what was learned, why it closed. Notes are\nappended, never edited.",
+      "properties": {
+        "by": {
+          "title": "By",
+          "type": "string"
+        },
+        "day": {
+          "title": "Day",
+          "type": "string"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "day",
+        "text",
+        "by"
+      ],
+      "title": "TaskNote",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "A task is true while open. It is never retired; it is closed with a date.",
+  "properties": {
+    "actor": {
+      "$ref": "#/$defs/Actor"
+    },
+    "anchor": {
+      "$ref": "#/$defs/Anchor"
+    },
+    "claim": {
+      "title": "Claim",
+      "type": "string"
+    },
+    "closed": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Closed"
+    },
+    "closed_by": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Closed By"
+    },
+    "derived_from": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Derived From",
+      "type": "array"
+    },
+    "id": {
+      "title": "Id",
+      "type": "string"
+    },
+    "notes": {
+      "items": {
+        "$ref": "#/$defs/TaskNote"
+      },
+      "title": "Notes",
+      "type": "array"
+    },
+    "opened": {
+      "title": "Opened",
+      "type": "string"
+    },
+    "scope": {
+      "title": "Scope",
+      "type": "string"
+    },
+    "status": {
+      "enum": [
+        "open",
+        "done",
+        "dropped",
+        "superseded"
+      ],
+      "title": "Status",
+      "type": "string"
+    },
+    "superseded_by": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Superseded By"
+    },
+    "waiting_on": {
+      "anyOf": [
+        {
+          "const": "principal",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Waiting On"
+    }
+  },
+  "required": [
+    "id",
+    "claim",
+    "scope",
+    "actor",
+    "anchor",
+    "opened",
+    "status"
+  ],
+  "title": "TaskRecord",
+  "type": "object",
+  "x-format": "task-record",
+  "x-format-version": 1
+}

@@ -1,0 +1,108 @@
+# Recant Memory
+
+> Makes an agent's context cost less for the same or better answers. Three parts, each usable alone: a cost saver
+> (meters every model call, prices each lever in dollars on the host's own traffic, applies the safe ones — cache
+> markers only — and checks and reverts them); managed memory (notes the agent writes and Recant checks, by default;
+> extracted memory with a review lifecycle as the fallback); and the measurement that sizes and checks both. A
+> library, not a service or an agent framework: it calls nothing on its own, sends nothing anywhere, and enforces no
+> spend limit.
+
+Import name `recant`. Python 3.11+. The extra `recant[anthropic]` installs the Anthropic SDK, which `recant.wrap` and
+the reference client use.
+
+## The cost saver
+
+- `recant.wrap(anthropic_client, store=..., tenant=..., job="agent")` — `Anthropic` or `AsyncAnthropic`; the same
+  `messages.create`, `create(stream=True)`, `messages.stream(...)` and `messages.count_tokens`; meters every call
+  (a stream from its final message's usage; thinking tokens as reasoning), carries out the applied safe levers on each
+  request, checks the request differs only in cache markers (else sends the host's own). `with client.run("agent",
+  session=...)` (or `async with`) is one host run, with its own log, so concurrent runs are metered apart.
+  Recant never times out or retries a call: set your own idle timeout (the SDK's 600 s read timeout does not cut a
+  stream that goes silent mid-body, and a mid-body break is not retried); a broken stream is recorded with its error.
+- `recant.metering.Meter(layout, tenant)` — for a host on its own client: `run(job)`, `record(job=, model=, usage=,
+  session=, system=, messages=, tools=, max_tokens=)` per model call, `tool(...)` per tool call, `close()`.
+- `recant.levers.apply(request_dict, recant.costshape.overlay(layout, tenant))` — the safe levers on an
+  Anthropic-shaped request; `recant.levers.declare_host(layout, tenant)` once, so the advisor applies them.
+- `recant cost --store DIR --tenant T [--nightly] [--all] [--revert ID] [--prices FILE] [--json]` — the report; with
+  `--nightly`, apply what is eligible and check what was applied (realized against predicted, after 50 runs or 7 days).
+- `recant.costshape` — `report`, `advise`, `apply`, `check`, `nightly`, `overlay`, `LIST_PRICES` (dated; overridable).
+- `recant.billing.reconcile` — the log against the provider's usage report, given a `BillingSource`.
+- `recant.metering.from_claude_code(result, meter, billing=)` / `from_agent_sdk(result_message, meter, billing=,
+  messages=)` — Claude Code's or the Agent SDK's own end-of-run totals, metered in their own rows (billed, and priced
+  at list); no lever applies to them.
+
+## Coverage: what Recant can't see
+
+- `recant.coverage.watch()` — on inside `recant.wrap` (`watch=False` to leave it off; `recant off` stops it): counts
+  requests from the host's process to known model-API hosts (`recant/known_hosts.py`) that did not go through Recant,
+  and `other` (domain hashed) for an unknown host with a model-call body. Counts only, never content. Hooks httpx and
+  httpx2; does not see other HTTP libraries or subprocesses.
+- Every report carries a Coverage line; a bench verdict is qualified below 90% of calls or of list-priced cost, and
+  gives no overall saving below 50%.
+- `recant coverage --usage runs.jsonl [--store DIR --tenant T] [--prices FILE] [--json]` — your own per-run totals
+  (`ts`, `model`, `tokens_in`, `tokens_out`, `cache_read`, `cache_write`, optional `billed`) against what Recant
+  metered on the same days, by model and provider.
+
+## Measuring it yourself
+
+- `recant bench --tasks T --run mod:run_task [--grade mod:grade] [--n] [--calibrate 10] [--mode safe] [--arm-a] [--arm-b]
+  [--out DIR] [--yes] [--estimate]` — calibration, frozen hashed predictions, paired arms with alternating order, a
+  cache salt and a fresh store per arm; `report.md`/`report.json` with cost, tokens, quality, latency, predicted against
+  realized, failures. `--arm-a safe --arm-b safe` is an A/A run; `safe+<lever id>` opts a your-call lever into an arm.
+- `recant eval memory --sessions S --make-questions` then `--questions Q [--arms none,history,notes,memory_v2]` —
+  memory on your own sessions; questions frozen by hash; mechanical scoring from the `ANSWER:` line.
+- `recant feedback` — the six-question form and a numbers-only bundle, every string on an allow-list; nothing is sent.
+- `recant off [--meter] | on | status --store DIR` (or `RECANT=off|meter|on`) — the switch, read on every call.
+- `recant --version` — version and commit; every report and bundle header carries them.
+
+## Managed notes (the default memory)
+
+- `recant.notes.TOOL_SPECS` — the `note_fact` and `read_notes` tool definitions (Anthropic tool JSON).
+- `recant.notes.handle(tool_name, tool_input, *, layout, tenant, lines, episode_path, today, principal_id)` — runs a
+  call: each entry checked against the session's lines, what passes written, refusals named with their reason.
+- `recant.notes.session_start(layout, tenant, store, *, principal_id, serve, today, block, model=, client=)` — the
+  rendered block for the prefix, after the switch check; None once the scope has moved to extracted memory.
+- `recant.notes.INSTRUCTION` — the system-prompt text that tells the agent how to keep notes.
+- `recant.episodes.open_session(layout, tenant, day)` — the session file the host appends each turn to;
+  `recant.episodes.read_session(layout, tenant, episode_path)` reads it back.
+
+## Extracted memory (the fallback)
+
+- `recant.Store(layout, allowlist)`, `recant.Ledger(layout, allowlist)`, `recant.StoreLayout(root)` (call
+  `layout.ensure(tenant)` first) — entries with statuses proposed / probation / live / contested / superseded /
+  retired; tasks.
+- `recant.extract(layout, tenant, day, machinery=, client=, store=, ledger=, principal_id=)` — a day's sessions into
+  proposed entries and tasks, through the caller's `ModelClient`.
+- `recant.store.review` — `memory_queue`, `decide_memory`, `task_queue`, `decide_task`.
+- `recant.budget.fit(entries, *, family, serve, view, question=None)` — a cached core and a per-question slice as
+  deterministic text blocks.
+- `recant.machinery.Machinery.seed_defaults(layout)` / `load(layout)` — the default artifact and kernel files.
+- `recant.ModelClient` — the protocol: `complete(request) -> Completion`; optional `count_tokens`, `submit`/`poll`.
+  `recant.clients.anthropic.AnthropicClient` is the reference implementation.
+- `recant.harness` — the eval harness: draft questions from your episodes, judge answers, compare arms against grep.
+
+## Files
+
+- CHANGELOG.md — each version's changes, and the measurements behind the README's numbers and the defaults.
+- README.md — what it is, install, three quickstarts, what leaves the host, what Recant can't see, known limits, the
+  client protocol, the formats.
+- examples/cost_quickstart.py — a raw-SDK agent with no caching, wrapped; the `recant cost` sequence in its docstring.
+- examples/cost_quickstart_async.py — the same agent on the async client, streamed, five tasks in flight.
+- examples/notes_agent.py — a complete raw-SDK agent with notes mode on (`--offline` without a key).
+- examples/memory_v2_agent.py — the extracted-memory loop: write, extract, review, fit.
+- src/recant/defaults/*.yaml — the default machinery files to copy and change.
+- src/recant/schemas/*.json — the public formats.
+
+## Rules a caller should know
+
+- Nothing leaves the host; the log keeps counts, tokens, timings and hashes, never the text.
+- Recant applies by itself only levers that change cache markers and nothing the model sees; everything else is
+  reported with its dollar size and left to the host.
+- Notes and memory files are canonical; indexes are derived and disposable.
+- A note's value must be in the principal's own words from the session, or in the output of a tool call made in it.
+- An entry's status moves only through a logged decision; nothing derived invalidates something stated. No confidence
+  score, importance score or TTL exists on an entry, by design.
+- The library never refuses a call on cost; put a ceiling, if you want one, around your client.
+- Known limits: extracted memory keeps no fact found only in tool output (use notes for those); the reasoning lever
+  is offered only where a model can carry it out; notes mode is not in `recant bench` yet; the wrapper is
+  Anthropic's only, and a second provider's waits for coverage evidence that a host relies on one.

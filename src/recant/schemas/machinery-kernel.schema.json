@@ -1,0 +1,767 @@
+{
+  "$defs": {
+    "Activation": {
+      "additionalProperties": false,
+      "properties": {
+        "consolidation_rate": {
+          "title": "Consolidation Rate",
+          "type": "integer"
+        },
+        "review_agreement": {
+          "title": "Review Agreement",
+          "type": "integer"
+        },
+        "rollback": {
+          "title": "Rollback",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "consolidation_rate",
+        "rollback",
+        "review_agreement"
+      ],
+      "title": "Activation",
+      "type": "object"
+    },
+    "Arms": {
+      "additionalProperties": false,
+      "properties": {
+        "context_cache_ttl": {
+          "enum": [
+            "5m",
+            "1h"
+          ],
+          "title": "Context Cache Ttl",
+          "type": "string"
+        },
+        "grep": {
+          "$ref": "#/$defs/GrepArm"
+        },
+        "service": {
+          "$ref": "#/$defs/ServiceArm"
+        }
+      },
+      "required": [
+        "grep",
+        "context_cache_ttl",
+        "service"
+      ],
+      "title": "Arms",
+      "type": "object"
+    },
+    "Corpus": {
+      "additionalProperties": false,
+      "properties": {
+        "allowlist": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Allowlist",
+          "type": "array"
+        },
+        "full_context": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Full Context",
+          "type": "array"
+        }
+      },
+      "required": [
+        "allowlist",
+        "full_context"
+      ],
+      "title": "Corpus",
+      "type": "object"
+    },
+    "CostCheck": {
+      "additionalProperties": false,
+      "description": "The cost check's settings: repetitions per arm and the gate. In the kernel because a gate is\na threshold nothing automated may move, and it enters the machinery hash like `gate`.",
+      "properties": {
+        "gate": {
+          "$ref": "#/$defs/CostCheckGate"
+        },
+        "level": {
+          "exclusiveMaximum": 1,
+          "exclusiveMinimum": 0,
+          "title": "Level",
+          "type": "number"
+        },
+        "reps": {
+          "minimum": 1,
+          "title": "Reps",
+          "type": "integer"
+        },
+        "resamples": {
+          "minimum": 100,
+          "title": "Resamples",
+          "type": "integer"
+        },
+        "seed": {
+          "default": 0,
+          "title": "Seed",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "reps",
+        "level",
+        "resamples",
+        "gate"
+      ],
+      "title": "CostCheck",
+      "type": "object"
+    },
+    "CostCheckGate": {
+      "additionalProperties": false,
+      "properties": {
+        "cache_hit_drop_max_pp": {
+          "minimum": 0,
+          "title": "Cache Hit Drop Max Pp",
+          "type": "number"
+        },
+        "cost_cut_min": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Cost Cut Min",
+          "type": "number"
+        }
+      },
+      "required": [
+        "cost_cut_min",
+        "cache_hit_drop_max_pp"
+      ],
+      "title": "CostCheckGate",
+      "type": "object"
+    },
+    "EvalProduction": {
+      "additionalProperties": false,
+      "description": "How the eval set itself is produced. Nothing automated may touch it.",
+      "properties": {
+        "arms": {
+          "$ref": "#/$defs/Arms"
+        },
+        "blind_first_sample": {
+          "minimum": 1,
+          "title": "Blind First Sample",
+          "type": "integer"
+        },
+        "blind_hard_cap": {
+          "minimum": 0,
+          "title": "Blind Hard Cap",
+          "type": "integer"
+        },
+        "context_lines": {
+          "minimum": 0,
+          "title": "Context Lines",
+          "type": "integer"
+        },
+        "dedupe": {
+          "$ref": "#/$defs/EvalPrompt"
+        },
+        "dedupe_question_overlap": {
+          "exclusiveMinimum": 0,
+          "maximum": 1,
+          "title": "Dedupe Question Overlap",
+          "type": "number"
+        },
+        "drafting": {
+          "$ref": "#/$defs/EvalPrompt"
+        },
+        "held_review": {
+          "$ref": "#/$defs/EvalPrompt"
+        },
+        "judge_agreement_floor": {
+          "exclusiveMinimum": 0,
+          "maximum": 1,
+          "title": "Judge Agreement Floor",
+          "type": "number"
+        },
+        "noise": {
+          "$ref": "#/$defs/EvalPrompt"
+        },
+        "noise_draft_ratio": {
+          "minimum": 0,
+          "title": "Noise Draft Ratio",
+          "type": "number"
+        },
+        "reader": {
+          "$ref": "#/$defs/ReaderPrompt"
+        },
+        "review": {
+          "$ref": "#/$defs/EvalPrompt"
+        },
+        "seeded": {
+          "$ref": "#/$defs/EvalPrompt"
+        },
+        "unmarked": {
+          "$ref": "#/$defs/Unmarked"
+        }
+      },
+      "required": [
+        "blind_first_sample",
+        "blind_hard_cap",
+        "judge_agreement_floor",
+        "noise_draft_ratio",
+        "context_lines",
+        "dedupe_question_overlap",
+        "unmarked",
+        "drafting",
+        "noise",
+        "seeded",
+        "dedupe",
+        "review",
+        "held_review",
+        "reader",
+        "arms"
+      ],
+      "title": "EvalProduction",
+      "type": "object"
+    },
+    "EvalPrompt": {
+      "additionalProperties": false,
+      "properties": {
+        "prompt": {
+          "minLength": 1,
+          "title": "Prompt",
+          "type": "string"
+        },
+        "prompt_version": {
+          "minLength": 1,
+          "title": "Prompt Version",
+          "type": "string"
+        },
+        "tier": {
+          "enum": [
+            1,
+            2,
+            3
+          ],
+          "title": "Tier",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "tier",
+        "prompt_version",
+        "prompt"
+      ],
+      "title": "EvalPrompt",
+      "type": "object"
+    },
+    "ExtractionRules": {
+      "additionalProperties": false,
+      "description": "Two mechanical rules on the extractor's candidates: within a run, a claim overlapping\nan already-written one at `run_dedupe_overlap`, or anchored on a line the store already holds an entry for, folds\nto it; an agent's line is never written as `stated` \u2014 the identity file owns what the agent says of itself; an\nagent turn may still `conclude`.",
+      "properties": {
+        "agent_lines_never_stated": {
+          "default": true,
+          "title": "Agent Lines Never Stated",
+          "type": "boolean"
+        },
+        "evidence_rule": {
+          "default": false,
+          "title": "Evidence Rule",
+          "type": "boolean"
+        },
+        "group_max_lines": {
+          "default": 120,
+          "minimum": 10,
+          "title": "Group Max Lines",
+          "type": "integer"
+        },
+        "group_max_moments": {
+          "default": 6,
+          "minimum": 1,
+          "title": "Group Max Moments",
+          "type": "integer"
+        },
+        "grouped": {
+          "default": false,
+          "title": "Grouped",
+          "type": "boolean"
+        },
+        "keys": {
+          "default": false,
+          "title": "Keys",
+          "type": "boolean"
+        },
+        "one_pass": {
+          "default": false,
+          "title": "One Pass",
+          "type": "boolean"
+        },
+        "run_dedupe_overlap": {
+          "default": 0.7,
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Run Dedupe Overlap",
+          "type": "number"
+        },
+        "split_facts": {
+          "default": false,
+          "title": "Split Facts",
+          "type": "boolean"
+        },
+        "store_dedupe_overlap": {
+          "anyOf": [
+            {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": 0.35,
+          "title": "Store Dedupe Overlap"
+        }
+      },
+      "title": "ExtractionRules",
+      "type": "object"
+    },
+    "Gate": {
+      "additionalProperties": false,
+      "properties": {
+        "floor_pp": {
+          "title": "Floor Pp",
+          "type": "number"
+        },
+        "margin_pp": {
+          "title": "Margin Pp",
+          "type": "number"
+        },
+        "suite_size": {
+          "title": "Suite Size",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "margin_pp",
+        "floor_pp",
+        "suite_size"
+      ],
+      "title": "Gate",
+      "type": "object"
+    },
+    "GrepArm": {
+      "additionalProperties": false,
+      "properties": {
+        "calls": {
+          "minimum": 1,
+          "title": "Calls",
+          "type": "integer"
+        },
+        "context_lines": {
+          "minimum": 0,
+          "title": "Context Lines",
+          "type": "integer"
+        },
+        "lines_per_call": {
+          "minimum": 1,
+          "title": "Lines Per Call",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "calls",
+        "lines_per_call",
+        "context_lines"
+      ],
+      "title": "GrepArm",
+      "type": "object"
+    },
+    "Heldout": {
+      "additionalProperties": false,
+      "properties": {
+        "reserve": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Reserve"
+        },
+        "slice": {
+          "title": "Slice",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "slice",
+        "reserve"
+      ],
+      "title": "Heldout",
+      "type": "object"
+    },
+    "ReaderPrompt": {
+      "additionalProperties": false,
+      "properties": {
+        "effort": {
+          "anyOf": [
+            {
+              "enum": [
+                "low",
+                "medium",
+                "high"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Effort"
+        },
+        "max_tokens": {
+          "minimum": 64,
+          "title": "Max Tokens",
+          "type": "integer"
+        },
+        "prompt": {
+          "minLength": 1,
+          "title": "Prompt",
+          "type": "string"
+        },
+        "prompt_version": {
+          "minLength": 1,
+          "title": "Prompt Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "prompt_version",
+        "prompt",
+        "max_tokens"
+      ],
+      "title": "ReaderPrompt",
+      "type": "object"
+    },
+    "ScopeFamily": {
+      "additionalProperties": false,
+      "description": "A coarse scope a session is served: entries whose `scope` (or claim) carries one of `match` belong to it;\nsessions on one of `channels` are served it; a `global` family is served to every session.",
+      "properties": {
+        "channels": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Channels",
+          "type": "array"
+        },
+        "global": {
+          "default": false,
+          "title": "Global",
+          "type": "boolean"
+        },
+        "match": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Match",
+          "type": "array"
+        },
+        "name": {
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "match"
+      ],
+      "title": "ScopeFamily",
+      "type": "object"
+    },
+    "Serve": {
+      "additionalProperties": false,
+      "description": "The served path's budget: the memory prefix a call may carry, in tokens, and the measured\nchars-per-token ratio the fitter converts with, so fitting is arithmetic. The consumer sets both.",
+      "properties": {
+        "chars_per_token": {
+          "exclusiveMinimum": 0,
+          "title": "Chars Per Token",
+          "type": "number"
+        },
+        "core_only_when_fits": {
+          "default": false,
+          "title": "Core Only When Fits",
+          "type": "boolean"
+        },
+        "core_tokens": {
+          "minimum": 0,
+          "title": "Core Tokens",
+          "type": "integer"
+        },
+        "learn_chars_per_token": {
+          "default": false,
+          "title": "Learn Chars Per Token",
+          "type": "boolean"
+        },
+        "memory_budget_tokens": {
+          "minimum": 1000,
+          "title": "Memory Budget Tokens",
+          "type": "integer"
+        },
+        "mode": {
+          "default": "normal",
+          "enum": [
+            "normal",
+            "hybrid",
+            "auto"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
+        "notes_default_tokens": {
+          "default": 95000,
+          "minimum": 0,
+          "title": "Notes Default Tokens",
+          "type": "integer"
+        },
+        "notes_min_sessions": {
+          "default": 20,
+          "minimum": 1,
+          "title": "Notes Min Sessions",
+          "type": "integer"
+        },
+        "notes_switch_runs": {
+          "default": 3,
+          "minimum": 1,
+          "title": "Notes Switch Runs",
+          "type": "integer"
+        },
+        "provenance": {
+          "default": "quote",
+          "enum": [
+            "quote",
+            "pointer"
+          ],
+          "title": "Provenance",
+          "type": "string"
+        },
+        "scopes": {
+          "items": {
+            "$ref": "#/$defs/ScopeFamily"
+          },
+          "title": "Scopes",
+          "type": "array"
+        },
+        "serve_once": {
+          "default": false,
+          "title": "Serve Once",
+          "type": "boolean"
+        },
+        "slice_tokens": {
+          "minimum": 0,
+          "title": "Slice Tokens",
+          "type": "integer"
+        },
+        "window_tokens": {
+          "default": 30000,
+          "minimum": 1000,
+          "title": "Window Tokens",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "memory_budget_tokens",
+        "chars_per_token",
+        "core_tokens",
+        "slice_tokens"
+      ],
+      "title": "Serve",
+      "type": "object"
+    },
+    "ServiceArm": {
+      "additionalProperties": false,
+      "properties": {
+        "chars_per_search": {
+          "minimum": 100,
+          "title": "Chars Per Search",
+          "type": "integer"
+        },
+        "entries_per_search": {
+          "minimum": 1,
+          "title": "Entries Per Search",
+          "type": "integer"
+        },
+        "rounds": {
+          "minimum": 1,
+          "title": "Rounds",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "rounds",
+        "entries_per_search",
+        "chars_per_search"
+      ],
+      "title": "ServiceArm",
+      "type": "object"
+    },
+    "Tasks": {
+      "additionalProperties": false,
+      "properties": {
+        "presumed_dropped_days": {
+          "minimum": 1,
+          "title": "Presumed Dropped Days",
+          "type": "integer"
+        },
+        "stale_after_days": {
+          "minimum": 1,
+          "title": "Stale After Days",
+          "type": "integer"
+        },
+        "stale_days": {
+          "minimum": 1,
+          "title": "Stale Days",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "stale_after_days",
+        "stale_days",
+        "presumed_dropped_days"
+      ],
+      "title": "Tasks",
+      "type": "object"
+    },
+    "Unmarked": {
+      "additionalProperties": false,
+      "description": "Yield items drafted from windows the nomination pass did not mark, so\nthe suite can see what the marker set misses.",
+      "properties": {
+        "oversample": {
+          "minimum": 1,
+          "title": "Oversample",
+          "type": "number"
+        },
+        "share": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Share",
+          "type": "number"
+        },
+        "window_lines": {
+          "minimum": 1,
+          "title": "Window Lines",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "share",
+        "window_lines",
+        "oversample"
+      ],
+      "title": "Unmarked",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "activation": {
+      "$ref": "#/$defs/Activation"
+    },
+    "corpus": {
+      "$ref": "#/$defs/Corpus"
+    },
+    "cost_check": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CostCheck"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "eval": {
+      "$ref": "#/$defs/EvalProduction"
+    },
+    "exploration_floors": {
+      "anyOf": [
+        {
+          "additionalProperties": {
+            "type": "number"
+          },
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Exploration Floors"
+    },
+    "extraction": {
+      "$ref": "#/$defs/ExtractionRules"
+    },
+    "format": {
+      "const": 4,
+      "title": "Format",
+      "type": "integer"
+    },
+    "gate": {
+      "$ref": "#/$defs/Gate"
+    },
+    "heldout": {
+      "$ref": "#/$defs/Heldout"
+    },
+    "noise_share": {
+      "maxItems": 2,
+      "minItems": 2,
+      "prefixItems": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "number"
+        }
+      ],
+      "title": "Noise Share",
+      "type": "array"
+    },
+    "serve": {
+      "$ref": "#/$defs/Serve"
+    },
+    "shadow_window_days": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Shadow Window Days"
+    },
+    "tasks": {
+      "$ref": "#/$defs/Tasks"
+    }
+  },
+  "required": [
+    "format",
+    "gate",
+    "noise_share",
+    "heldout",
+    "activation",
+    "shadow_window_days",
+    "exploration_floors",
+    "corpus",
+    "eval",
+    "tasks",
+    "serve",
+    "extraction",
+    "cost_check"
+  ],
+  "title": "Kernel",
+  "type": "object",
+  "x-format": "machinery-kernel",
+  "x-format-version": 4
+}

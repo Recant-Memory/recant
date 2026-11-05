@@ -1,0 +1,233 @@
+{
+  "$defs": {
+    "Actor": {
+      "additionalProperties": false,
+      "properties": {
+        "class": {
+          "enum": [
+            "principal",
+            "agent"
+          ],
+          "title": "Class",
+          "type": "string"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "class",
+        "id"
+      ],
+      "title": "Actor",
+      "type": "object"
+    },
+    "Anchor": {
+      "additionalProperties": false,
+      "properties": {
+        "channel": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Channel"
+        },
+        "episode": {
+          "title": "Episode",
+          "type": "string"
+        },
+        "message_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Message Id"
+        },
+        "quote": {
+          "title": "Quote",
+          "type": "string"
+        },
+        "timestamp": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Timestamp"
+        }
+      },
+      "required": [
+        "quote",
+        "episode"
+      ],
+      "title": "Anchor",
+      "type": "object"
+    },
+    "Status": {
+      "additionalProperties": false,
+      "properties": {
+        "failure_class": {
+          "anyOf": [
+            {
+              "enum": [
+                "contradiction",
+                "staleness",
+                "premise_collapse"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Failure Class"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reason"
+        },
+        "state": {
+          "enum": [
+            "proposed",
+            "probation",
+            "live",
+            "contested",
+            "superseded",
+            "retired"
+          ],
+          "title": "State",
+          "type": "string"
+        },
+        "superseded_by": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Superseded By"
+        }
+      },
+      "required": [
+        "state"
+      ],
+      "title": "Status",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "actor": {
+      "$ref": "#/$defs/Actor"
+    },
+    "anchor": {
+      "$ref": "#/$defs/Anchor"
+    },
+    "claim": {
+      "title": "Claim",
+      "type": "string"
+    },
+    "derived_from": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Derived From",
+      "type": "array"
+    },
+    "id": {
+      "title": "Id",
+      "type": "string"
+    },
+    "key": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Key"
+    },
+    "kind": {
+      "enum": [
+        "stated",
+        "observed",
+        "concluded",
+        "directive"
+      ],
+      "title": "Kind",
+      "type": "string"
+    },
+    "scope": {
+      "title": "Scope",
+      "type": "string"
+    },
+    "status": {
+      "$ref": "#/$defs/Status"
+    },
+    "supersession_condition": {
+      "title": "Supersession Condition",
+      "type": "string"
+    },
+    "value_status": {
+      "anyOf": [
+        {
+          "enum": [
+            "current",
+            "historical",
+            "concurrent"
+          ],
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Value Status"
+    }
+  },
+  "required": [
+    "id",
+    "claim",
+    "kind",
+    "actor",
+    "anchor",
+    "scope",
+    "supersession_condition",
+    "status"
+  ],
+  "title": "MemoryRecord",
+  "type": "object",
+  "x-format": "memory-record",
+  "x-format-version": 1
+}

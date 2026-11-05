@@ -1,0 +1,275 @@
+{
+  "$defs": {
+    "Extractor": {
+      "additionalProperties": false,
+      "properties": {
+        "first_pass": {
+          "$ref": "#/$defs/ModelJob"
+        },
+        "steady_state": {
+          "$ref": "#/$defs/ModelJob"
+        },
+        "tasks": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ModelJob"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "first_pass",
+        "steady_state"
+      ],
+      "title": "Extractor",
+      "type": "object"
+    },
+    "Marker": {
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "minLength": 1,
+          "title": "Description",
+          "type": "string"
+        },
+        "name": {
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "description"
+      ],
+      "title": "Marker",
+      "type": "object"
+    },
+    "ModelJob": {
+      "additionalProperties": false,
+      "description": "A model, and the prompt it runs. The text sits beside its version so\nthat the file's hash covers the thing that actually changes.",
+      "properties": {
+        "max_tokens": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Tokens"
+        },
+        "model": {
+          "title": "Model",
+          "type": "string"
+        },
+        "prompt": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Prompt"
+        },
+        "prompt_version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Prompt Version"
+        },
+        "reasoning": {
+          "anyOf": [
+            {
+              "enum": [
+                "off",
+                "on"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reasoning"
+        }
+      },
+      "required": [
+        "model",
+        "prompt_version",
+        "prompt"
+      ],
+      "title": "ModelJob",
+      "type": "object"
+    },
+    "Reader": {
+      "additionalProperties": false,
+      "properties": {
+        "model": {
+          "title": "Model",
+          "type": "string"
+        }
+      },
+      "required": [
+        "model"
+      ],
+      "title": "Reader",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "contestation_threshold": {
+      "minimum": 1,
+      "title": "Contestation Threshold",
+      "type": "integer"
+    },
+    "dedup_threshold": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Dedup Threshold"
+    },
+    "extractor": {
+      "$ref": "#/$defs/Extractor"
+    },
+    "fitness_weights": {
+      "anyOf": [
+        {
+          "additionalProperties": {
+            "type": "number"
+          },
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Fitness Weights"
+    },
+    "format": {
+      "const": 3,
+      "title": "Format",
+      "type": "integer"
+    },
+    "judge": {
+      "$ref": "#/$defs/ModelJob"
+    },
+    "markers": {
+      "items": {
+        "$ref": "#/$defs/Marker"
+      },
+      "minItems": 1,
+      "title": "Markers",
+      "type": "array"
+    },
+    "nomination": {
+      "$ref": "#/$defs/ModelJob"
+    },
+    "ranking_weights": {
+      "anyOf": [
+        {
+          "additionalProperties": {
+            "type": "number"
+          },
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Ranking Weights"
+    },
+    "reader": {
+      "$ref": "#/$defs/Reader"
+    },
+    "replay_sampling": {
+      "enum": [
+        "full",
+        "subsample"
+      ],
+      "title": "Replay Sampling",
+      "type": "string"
+    },
+    "review_reasons": {
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "title": "Review Reasons",
+      "type": "array"
+    },
+    "routing": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "title": "Routing",
+      "type": "object"
+    },
+    "trust_table": {
+      "items": {
+        "items": {
+          "maxItems": 2,
+          "minItems": 2,
+          "prefixItems": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "type": "array"
+        },
+        "type": "array"
+      },
+      "title": "Trust Table",
+      "type": "array"
+    },
+    "version_note": {
+      "title": "Version Note",
+      "type": "string"
+    }
+  },
+  "required": [
+    "format",
+    "version_note",
+    "markers",
+    "extractor",
+    "nomination",
+    "judge",
+    "reader",
+    "dedup_threshold",
+    "ranking_weights",
+    "fitness_weights",
+    "replay_sampling",
+    "routing",
+    "trust_table",
+    "contestation_threshold",
+    "review_reasons"
+  ],
+  "title": "Artifact",
+  "type": "object",
+  "x-format": "machinery-artifact",
+  "x-format-version": 4
+}

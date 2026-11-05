@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "recant"
+version = "0.3.0"          # see CHANGELOG.md (above the empty 0.0.1 name reservation on PyPI)
+description = "A cost saver, managed memory and the measurement that sizes both, for any agent: meter your calls, apply the safe savings, keep checked notes, fall back to extracted memory."
+requires-python = ">=3.11"
+license = "Apache-2.0"
+authors = [{ name = "GREYi, INC" }]
+license-files = ["LICENSE"]
+dependencies = ["pydantic>=2.7,<3", "pyyaml>=6", "python-ulid>=2"]
+
+[project.scripts]
+recant = "recant.cli:main"          # `recant cost`
+
+[project.optional-dependencies]
+anthropic = ["anthropic>=1,<2"]
+test = ["pytest>=8", "anthropic>=1,<2"]      # the tests import the reference client
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+recant = ["schemas/*.json", "defaults/*.yaml", "defaults/v2/*.yaml"]   # v2: the opt-in memory v2 machinery
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

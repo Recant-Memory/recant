@@ -1,0 +1,100 @@
+# Recant's default kernel (the protected half of the machinery). Serving: a 25,000-token cached core and a 12,500-token
+# retrieved slice: a starting point, not a measured optimum for your sessions; measure yours with
+# `recant eval memory` and set serve.* to suit (see the CHANGELOG, 0.1.0);
+# the corpus is the sessions you append through Recant. The eval block configures the measurement harness, not
+# memory: set its prompts and sizes before you measure with it.
+format: 4
+gate:
+  margin_pp: 4.5
+  floor_pp: 3.0
+  suite_size: 300
+noise_share:
+- 0.25
+- 0.3
+heldout:
+  slice: 60
+  reserve: 60
+activation:
+  consolidation_rate: 30
+  rollback: 20
+  review_agreement: 59
+shadow_window_days: null
+exploration_floors: null
+corpus:
+  allowlist:
+  - hot/sessions/????-??-??/*.md
+  - hot/????-??-??.md
+  full_context:
+  - hot/????-??-??.md
+eval:
+  blind_first_sample: 6
+  blind_hard_cap: 2
+  judge_agreement_floor: 0.9
+  noise_draft_ratio: 0.5
+  context_lines: 2
+  dedupe_question_overlap: 0.5
+  unmarked:
+    share: 0.1
+    window_lines: 4
+    oversample: 3
+  drafting:
+    tier: 2
+    prompt_version: d1
+    prompt: Draft a question and a candidate answer.
+  noise:
+    tier: 2
+    prompt_version: x1
+    prompt: Draft a plausible question the corpus does not answer.
+  seeded:
+    tier: 2
+    prompt_version: s1
+    prompt: Answer the supplied question from the episodes.
+  dedupe:
+    tier: 2
+    prompt_version: p1
+    prompt: Group drafts that ask for the same fact.
+  review:
+    tier: 3
+    prompt_version: r1
+    prompt: Review the drafted item.
+  held_review:
+    tier: 3
+    prompt_version: h1
+    prompt: Does any search hit answer the question.
+  reader:
+    prompt_version: q1
+    prompt: Answer from the material or say NOTHING RELEVANT.
+    max_tokens: 200
+  arms:
+    grep:
+      calls: 3
+      lines_per_call: 5
+      context_lines: 1
+    context_cache_ttl: 5m
+    service:
+      rounds: 3
+      entries_per_search: 5
+      chars_per_search: 4000
+tasks:
+  stale_after_days: 30
+  stale_days: 3
+  presumed_dropped_days: 14
+extraction:
+  run_dedupe_overlap: 0.7
+  agent_lines_never_stated: true
+serve:
+  mode: auto                 # managed notes by default, memory v2 as the fallback above notes_default_tokens
+  notes_default_tokens: 95000   # the crossover measured in counted tokens
+  memory_budget_tokens: 37500
+  chars_per_token: 4.0
+  core_tokens: 25000
+  slice_tokens: 12500
+  scopes: []
+cost_check:
+  reps: 3
+  level: 0.95
+  resamples: 2000
+  seed: 0
+  gate:
+    cost_cut_min: 0.15
+    cache_hit_drop_max_pp: 1.0

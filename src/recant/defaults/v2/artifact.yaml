@@ -1,0 +1,318 @@
+# Recant's memory v2 artifact (opt-in): the defaults plus a stated_fact marker
+# (nomination n5) and one grouped extraction (e7): several moments a call, memories and tasks as two lists, one memory
+# per stated fact with a (scope, entity, attribute) key and a value status, never on the agent's own say-so.
+format: 3
+version_note: 'Recant''s default machinery: host-neutral prompts, real models, reasoning off. Every value is yours to change.'
+markers:
+- name: rule_or_decision
+  description: 'the principal settles how something is or will be: a rule, preference, boundary or decision about the system,
+    the project or how the agent behaves from now on.'
+- name: directive_to_act
+  description: 'the principal tells the agent to go and do or find out something about its own work: investigate, verify,
+    explain, stop, wait, report back, or proceed in a stated way. Most of what the principal sends is this, not a decision.
+    A request for a product feature or a bug report about the product being built is NOT this: it is a task, and tasks are
+    not marked.'
+- name: root_cause
+  description: A diagnosis or root cause is reached.
+- name: failure_with_reason
+  description: Something failed and the reason was established.
+- name: reversal
+  description: An earlier conclusion, plan, decision or claim is contradicted, reversed, abandoned or replaced by another
+    — including a decision reversed later the same day (a morning 'keep the old UI' undone by an afternoon 'switch to the
+    new one'). Includes 'originally X, switched to Y', an 'evolved decision', an approach dropped for one that worked, a version
+    or model pinned and then re-pinned, and the agent having claimed something that turned out wrong. Put both the earlier
+    and the later position inside the span when they are on the same or adjacent lines; when the reversal is a later line
+    of the same file, mark the later line and quote it.
+- name: manner_correction
+  description: 'the principal tells the agent that the way it worked or communicated was wrong, and how to do it instead:
+    too verbose, acted without asking, skipped a check, reported badly. Asking for a feature, reporting a bug, or giving a
+    new task is NOT a correction of manner, however it is phrased.'
+- name: non_compliance
+  description: 'the agent does something other than comply immediately: it disagrees, declines, asks instead of assuming,
+    or volunteers something unasked.'
+- name: stated_fact
+  description: 'The principal states something durable about their world: a person, an amount, a date, a vendor, a place,
+    a count, a schedule. Mark the principal''s own line, never the agent''s echo of it.'
+- name: established_finding
+  description: 'A fact is established by a tool or by reading a file, and a later task would otherwise have to look it up
+    again: where something is configured or set, what a durable setting, endpoint, path, owner or schedule is, how a system
+    is actually wired. It stays true until something changes it. Not a value true only that day (a version that day, a count,
+    a status), and not the agent saying it is about to look.'
+extractor:
+  first_pass:
+    model: claude-sonnet-5
+    reasoning: 'off'
+    prompt_version: e6
+    prompt: |
+      You are writing one memory for an AI agent from a marked moment in its working record. The record is
+      the agent's own notes and the transcripts of its sessions with the person it works for, its principal. You are shown the moment, the lines around it, the markers that fired on it, and sometimes
+      same-day lines from the other source.
+
+      A memory is a single proposition that changes what the agent would do in a future situation. If the
+      moment carries no such proposition, say so: verdict not_a_memory with the reason.
+      - gauge_reading: a value the agent read off a tool that day and nobody stated as how things stand (a test
+        count climbing, a queue length right now). An amount, count, balance, budget or date the principal states
+        is a memory: write it dated ("13,500 as of 2026-09-01"); a later value supersedes it.
+      - transient_metric: a number on its way somewhere (a test count climbing, a timing).
+      - dead_pointer: a path, id or handle that will not be there later.
+      - protocol_exhaust: heartbeats, acknowledgements, the agent narrating its next step.
+      - task: work to do or done, a bug report, a feature request, an open item. Working state is not a memory.
+      - restates: the same moment is stated more completely elsewhere in the lines shown.
+      - no_proposition: nothing here changes a future decision.
+      - own_tool_failure: the agent's own failed, refused or repeated tool calls, or how it misused a tool.
+
+      Otherwise verdict memory, with exactly these fields.
+      - claim: the proposition in one or two sentences, written to be read cold by someone with no context.
+        State what was directed, decided, diagnosed or established. Never give the principal a reason, motive or
+        judgement unless the lines quote them giving it. Never use "the principal said" phrasing: state the claim.
+      - kind: stated (someone asserted it as a fact or preference), observed (something was seen to happen or
+        was read off a tool), concluded (reasoned to from evidence), directive (someone told the agent how to
+        act or what to do from now on).
+      - actor_class and actor_id: who asserted it. principal means the principal themself: in a transcript, a line
+        that is their own turn; in the daily notes, only a line that quotes them. A daily line that reports them without quoting them is the agent's report: actor_class agent, actor_id "agent". A directive from
+        another agent instance or a system line is agent, with its name as the id.
+      - quote, quote_start_line, quote_end_line: the anchor, on the principal's own line or a tool's result,
+        never the agent's own words (its echo, narration or account). Copy the quote character for character from
+        the lines shown, from the episode above (never from the same-day lines), and give the line numbers
+        it sits on. Do not paraphrase, join lines that are not adjacent, or repair text that is cut off.
+      - channel: the channel the line names, if any ("chat", "cron"), else empty.
+      - timestamp: a timestamp the line carries, else empty.
+      - scope: the system, project or entity the claim binds to (a product, a service, a repo, "the agent itself", "how the agent works with the principal"). Not "general".
+      - attribute: what the claim is about within its scope, as a key: lower case, singular, words joined by
+        underscores (accountant, equipment_loan_balance, payroll_day). The keys already in the store are listed
+        with the moment; when the attribute is the same as one of them, reuse that key exactly, whatever the
+        wording, so a new value supersedes the old.
+      - supersession_condition: what would make this claim stop being true, as a condition, never a date.
+      - notes: at most two sentences of context a reader would need; empty if none.
+
+      Rules. One stated fact, one memory. When the moment states several separate facts (one message giving a
+      supplier, an account number and a date), write the first in the fields above and each further one in
+      more_facts, each with its own claim, attribute, quote, lines, scope and supersession condition; otherwise
+      more_facts is empty. Do not split one fact, and do not merge separate ones. The claim binds to its
+      scope, not to the world.
+      Do not store process ids, session ids, file paths that will move, or anything a heartbeat produced.
+      If the moment contradicts an earlier position and both are in the lines shown, the claim is the later
+      position and the notes name the earlier one.
+      Absence is not negation: that the lines do not mention something is never a claim that it is false or
+      was not done. An unresolved discrepancy stays unresolved in the claim ("the count is 26 by one source
+      and 33 by another; unresolved"); never pick a side the lines do not settle.
+      A directive that pins a version of something (a model, a template, a ruleset, an image) is a claim about
+      that version: state the version and the date it was set, so a later pin can supersede it.
+      A directive whose scope is one job — a named branch, PR, phase, lane, brief or item, a one-time gate or
+      go-ahead — is task state, not a standing rule: verdict not_a_memory, reason task.
+      A moment marked established_finding is a memory when the fact stays true until something changes it
+      (where a value is set, what a durable setting or owner is, how a system is wired): kind observed, the
+      claim names where it was established (the file or the tool), and supersession_condition names what
+      would change it. It is gauge_reading only when the value was true that day alone.
+      The agent's own tool failures and retries are not memories: a call that errored, was refused or was
+      repeated, a note that the agent misused a tool, or the agent's own account of such a failure in a reply or a
+      ledger note ("I called the tool without …", "the same mistake again"), is verdict not_a_memory, reason
+      own_tool_failure.
+      A fact about the environment that a failure revealed (a path that does not exist, a service that is down
+      by design, a limit of the machine) is a memory: state the fact, not the failure.
+  steady_state:
+    model: claude-sonnet-5
+    reasoning: 'off'
+    prompt_version: e9
+    prompt: |
+      You are deciding, for each marked moment in a stretch of an AI agent's working record, what it keeps: memories, tasks,
+      or nothing. The record is the agent's notes and the transcripts of its sessions with the person it works for, its
+      principal. You are shown the lines once, the moments to decide (each with its lines and the markers that fired on it),
+      sometimes same-day lines from another source, and the keys already in the store.
+
+      Answer with three lists. Every moment must appear in at least one of them; each item names its moment ("m1", "m2"...).
+
+      memories: one item per durable fact. A memory is a single proposition that changes what the agent would do in a
+      future situation. One stated fact, one memory: a message giving a supplier, an account number and a date is three
+      memories, each with its own quote and lines. Do not split one fact, and do not merge separate ones. Fields:
+      - claim: the proposition in one or two sentences, read cold by someone with no context. State what was directed,
+        decided, diagnosed or established. Never give the principal a reason, motive or judgement unless the lines quote
+        them giving it. Never "the principal said": state the claim.
+      - kind: stated (asserted as a fact or preference), observed (seen to happen or read off a tool), concluded (reasoned
+        to from evidence), directive (the agent was told how to act or what to do from now on).
+      - actor_class and actor_id: who asserted it. principal means the principal themself: in a transcript, their own turn;
+        in notes, only a line that quotes them. Anything else is agent, with its name as the id.
+      - quote, quote_start_line, quote_end_line: the anchor. It is the principal's own line or a tool's result, never the
+        agent's own words (its echo of what was said, its narration, its account). Copy the quote character for character
+        from the lines shown (never from the same-day lines), with the line numbers it sits on.
+      - timestamp: a timestamp the line carries, else empty.
+      - scope: what the claim binds to (the company, a product, a service, a person's household). Not "general".
+      - entity: within the scope, the particular person, account, site, product or period the fact is about, when the scope
+        has several of them ("account:example_roasters", "son", "office:dublin"); "-" when it has one. The entity says
+        which thing the fact is about, never its value: for "the second site will open in Cork" the entity is
+        "second_site" (or "-"), the attribute "location", and Cork is in the claim.
+      - attribute: what the fact is about, as a key: lower case, singular, words joined by underscores (accountant,
+        equipment_loan_balance, payroll_day). When a key already in the store means the same scope, entity and attribute,
+        reuse its parts exactly, whatever the wording, so a new value supersedes the old.
+      - value_status: current (how things stand now), historical (a past value stated as past: "we used to bank with ..."),
+        or concurrent (one of several values true at once: two offices, two accounts; give each its own entity).
+      - supersession_condition: what would make the claim stop being true, as a condition, never a date.
+      - notes: at most two sentences of context; empty if none.
+
+      tasks: one item per piece of work set, done or dropped in the moment: a job, a fix, a check, a reminder to send, a
+      decision to make, with a scope and an owner. A moment can give both a memory and a task ("our new supplier is Example
+      Trading; contact them tomorrow" is a memory about the supplier and a task to contact them). Fields: moment, claim
+      (the work in one sentence, read cold), scope, actor_class, actor_id, quote, quote_start_line, quote_end_line (as for
+      memories), status (open; done if the lines shown carry its completion; dropped if abandoned), closed_line (the closing
+      line's number when done or dropped and shown, else 0), timestamp, notes.
+
+      declined: a moment that keeps nothing, with its reason:
+      - gauge_reading: a value the agent read off a tool that day that nobody stated as how things stand (a queue length
+        right now). An amount, count, balance, budget or date the principal states is a memory, written dated
+        ("13,500 as of 2026-09-01"); a later value supersedes it.
+      - transient_metric: a number on its way somewhere (a test count climbing, a timing).
+      - dead_pointer: a path, id or handle that will not be there later.
+      - protocol_exhaust: heartbeats, acknowledgements, the agent narrating its next step.
+      - task: (only when the answer has no tasks list) the moment is work, for the task ledger's own pass.
+      - restates: the same fact is stated more completely elsewhere in the lines shown.
+      - no_proposition: nothing here changes a future decision.
+      - own_tool_failure: the agent's own failed, refused or repeated tool calls, or how it misused a tool.
+
+      Rules.
+      - What the agent says about itself is not a memory on its own say-so: what it can or cannot do, what it has or has
+        not been told, its own earlier mistakes. A capability or limit is a memory only when a tool result shows it or the
+        principal states it.
+      - Absence is never evidence: that something was not mentioned, not provided or not on record is never a memory.
+      - The principal's own line is evidence on its own. When the agent later doubts it, disputes it or says it came
+        from somewhere else, the principal's statement still stands and is written: the agent's doubt is its own words.
+      - An unresolved discrepancy stays unresolved in the claim; never pick a side the lines do not settle.
+      - If a moment contradicts an earlier position and both are shown, the claim is the later position and the notes name
+        the earlier one.
+      - A directive whose scope is one job (a named branch, item, one-time gate or go-ahead) is a task, not a standing rule.
+      - A fact about the environment that a failure revealed (a path that does not exist, a limit of the machine) is a
+        memory: state the fact, not the failure.
+      - Do not store process ids, session ids, or anything a heartbeat produced.
+  tasks:
+    model: claude-sonnet-5
+    reasoning: 'off'
+    prompt_version: t1
+    prompt: |
+      You are writing one task for an AI agent's task ledger from a marked moment in its working record.
+      The record is the agent's daily notes and the transcripts of its sessions with the person it works for,
+      the principal. The moment was classified as task state: work to be done, done, or gated, rather than a
+      durable memory. You are shown the moment, the lines around it, and sometimes same-day lines from
+      the other source.
+
+      A task is one piece of work someone is to do or has done: a job, a fix, an investigation, a
+      deployment, a decision to make, a check to run, with a scope (which project, repo, thread or
+      workstream) and an owner. It is true while open and closes with a date.
+
+      Reply with verdict task, or verdict not_a_task with a reason:
+      - is_memory: the moment is a standing rule, decision, diagnosis or preference, not a piece of work.
+      - protocol_exhaust: a heartbeat, an acknowledgement, the agent narrating its next step.
+      - gauge_reading: a value that was true that day, not work.
+      - no_proposition: nothing here is work to be done or done.
+
+      For a task, exactly these fields.
+      - claim: what is to be done, in one sentence, read cold: "Move the three billing reports from the old
+        dashboard to the new one." Not "the principal asked the agent to…": state the work.
+      - scope: the project, repo, thread or workstream the task belongs to. Not "general".
+      - actor_class and actor_id: who set the task. principal means the principal themself: in a transcript, their
+        own turn; in the daily notes, only a line that quotes them. A daily line reporting them without
+        quoting them is the agent's: actor_class agent, actor_id "agent".
+      - quote, quote_start_line, quote_end_line: copy the quote character for character from the lines
+        shown, from the episode above (never the same-day lines), with the line numbers it sits on.
+      - status: open if the lines show the work set or in progress; done if the lines shown carry its
+        completion ("done", "shipped", "merged", "verified", a commit for it); dropped if the lines say it
+        was abandoned.
+      - closed_line: when status is done or dropped and the closing line is among the lines shown, its
+        line number; else 0.
+      - channel, timestamp: as the line carries them, else empty.
+      - notes: at most two sentences of context; empty if none.
+
+      One moment, at most one task; do not split it. If the moment sets several tasks, write the one the
+      markers point at and name the others in notes.
+nomination:
+  model: claude-sonnet-5
+  reasoning: 'off'
+  max_tokens: 32000
+  prompt_version: n7
+  prompt: |
+    You are reading one episode from the working record of an AI agent and the person it works for
+    (the principal). The episode is either a daily notes file or a session transcript. Every line is
+    prefixed with its line number.
+
+    Find the marked moments. A marked moment is a place where one of these happened:
+    {markers}
+
+    Rules.
+    - Most lines are not marked moments. Protocol exhaust (heartbeats, NO_REPLY, cron triggers, the
+      agent narrating its next tool call), gauge readings (a version or image that was current that
+      day), transient metrics (a test count as it climbs), process ids and dead file paths are never
+      marked moments, unless the line establishes a durable fact a later task would otherwise look up again
+      (established_finding): a value or path that stays true until something changes it. A quiet episode
+      has none: return an empty list.
+    - When the principal states durable facts about their world (people, amounts, dates, vendors, places,
+      counts, schedules), mark each line that states them as stated_fact, even when it states several. Report
+      the principal's own line, never the agent's echo of it.
+    - A change to a durable fact ("Update: …", "now …", "we switched to …", a new value for something stated
+      before) is a marked moment, stated_fact and also reversal when it replaces an earlier value, even when the
+      agent then files it into a task, a note or a draft. Mark the principal's line that states the change.
+      - The principal's own statement is marked even when the agent later doubts, disputes or misattributes it
+        ("that didn't come from you", "that doesn't match what you told me"): the agent's doubt is not evidence.
+    - Report the smallest span of lines that contains the moment.
+    - quote must be copied character for character from inside those lines. Do not paraphrase, join
+      lines that are not adjacent, or repair text that is cut off. Transcript lines are often
+      truncated; quote them as they are.
+    - If the same moment is pasted more than once, report its first occurrence only.
+    - In a transcript, only lines that carry a message from the principal count as the principal speaking. A system
+      or cron line is not the principal.
+    - A moment may fit two markers. "You are supposed to be using the other model" corrects the agent's
+      manner and directs it to act. Report such a moment once under each marker that fits.
+    - A task is not a marked moment. A feature request, a bug report, a to-do, an item of work done or
+      still open: none of these is marked, unless it also carries one of the things above.
+    - Do not mark a line that only restates, sequences or schedules another moment ("after X, do Y",
+      "X is done, next is Y"), or an implementation detail no later session would act on. Mark the
+      moment once, where it is decided or established.
+judge:
+  model: claude-sonnet-5
+  prompt_version: j1
+  prompt: |
+    You score one answer against a reference answer. Reply with correct true or false and one
+    sentence of rationale. You are strict and literal; you do not give credit for being on topic.
+
+    - yield item: correct only if the answer states the same fact as the reference. Wording does
+      not matter. Extra detail is fine if it does not contradict the reference. An answer that is
+      vague, hedged into saying nothing, or merely about the right subject is wrong. An answer that
+      adds a specific claim contradicting the reference is wrong.
+    - noise item (the reference is "nothing relevant"): correct only if the answer says that nothing
+      relevant was found or that it does not know. Any confident answer is wrong.
+    - supersession item: correct only if the answer gives the current answer in the reference. If
+      it gives the superseded answer without saying it was later overturned, it is wrong.
+reader:
+  model: claude-sonnet-5
+dedup_threshold: 0.6
+ranking_weights: null
+fitness_weights: null
+replay_sampling: full
+routing:
+  1: claude-haiku-4-5
+  2: claude-sonnet-5
+  3: claude-opus-5-5
+trust_table:
+- - - stated
+    - principal
+  - - directive
+    - principal
+- - - observed
+    - principal
+- - - stated
+    - agent
+  - - directive
+    - agent
+- - - observed
+    - agent
+- - - concluded
+    - principal
+- - - concluded
+    - agent
+contestation_threshold: 1
+review_reasons:
+- contradiction
+- staleness
+- premise_collapse
+- bad_question
+- wrong_answer
+- not_a_memory
+- confirmed
+- citation

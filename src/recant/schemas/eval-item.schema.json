@@ -1,0 +1,91 @@
+{
+  "$defs": {
+    "Tests": {
+      "additionalProperties": false,
+      "properties": {
+        "hard": {
+          "default": false,
+          "title": "Hard",
+          "type": "boolean"
+        },
+        "marker": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Marker"
+        },
+        "stratum": {
+          "title": "Stratum",
+          "type": "string"
+        },
+        "type": {
+          "enum": [
+            "yield",
+            "noise",
+            "supersession"
+          ],
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "stratum"
+      ],
+      "title": "Tests",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "answer": {
+      "title": "Answer",
+      "type": "string"
+    },
+    "episode": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Episode"
+    },
+    "exposure": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Exposure",
+      "type": "integer"
+    },
+    "id": {
+      "title": "Id",
+      "type": "string"
+    },
+    "question": {
+      "title": "Question",
+      "type": "string"
+    },
+    "tests": {
+      "$ref": "#/$defs/Tests"
+    }
+  },
+  "required": [
+    "id",
+    "question",
+    "answer",
+    "episode",
+    "tests"
+  ],
+  "title": "EvalItem",
+  "type": "object",
+  "x-format": "eval-item",
+  "x-format-version": 1
+}
