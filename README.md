@@ -20,13 +20,20 @@ yours. It calls nothing on its own and enforces no spend limit.
 
 ## Install
 
-From GitHub, pinned to a tag:
+From PyPI:
 
 ```
-pip install "recant[anthropic] @ git+https://github.com/recant-memory/recant@v0.3.0"
+pip install "recant[anthropic]"
 ```
 
-`recant --version` prints the version and the commit you installed; every report carries both.
+Or from GitHub, pinned to a tag:
+
+```
+pip install "recant[anthropic] @ git+https://github.com/recant-memory/recant@v0.3.1"
+```
+
+`recant --version` prints the version and, for an install from GitHub or a source checkout, the commit; every report
+carries both (the commit reads "unknown" for an install from PyPI).
 `[anthropic]` adds the Anthropic SDK, which `recant.wrap` and the reference client use; leave it off if your agent
 uses its own client. From a source checkout: `pip install "./recant[anthropic]"`, and `pip install "./recant[test]"`
 then `pytest recant` runs the tests. Python 3.11+. Dependencies: pydantic, pyyaml, python-ulid.

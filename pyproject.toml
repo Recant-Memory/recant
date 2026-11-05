@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "recant"
-version = "0.3.0"          # see CHANGELOG.md (above the empty 0.0.1 name reservation on PyPI)
+version = "0.3.1"          # see CHANGELOG.md (above the empty 0.0.1 name reservation on PyPI)
 description = "A cost saver, managed memory and the measurement that sizes both, for any agent: meter your calls, apply the safe savings, keep checked notes, fall back to extracted memory."
 requires-python = ">=3.11"
 license = "Apache-2.0"
