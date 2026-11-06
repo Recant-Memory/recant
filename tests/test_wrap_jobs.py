@@ -46,3 +46,40 @@ def test_a_call_with_no_run_or_an_unnamed_run_is_the_wrapper_s_job(layout):
     client.messages.create(model="claude-sonnet-5-5", max_tokens=8, messages=[{"role": "user", "content": "b"}])
     client.close()
     assert {r["job"] for r in records(layout)} == {"support"}
+
+
+def test_the_report_names_the_jobs_a_share_is_of_and_says_its_weekly_scale(layout):
+    client = wrap(sdk(API()), store=layout, tenant=TENANT)
+    two_agents(client, n=4)
+    host = json.loads((layout.costshape_dir(TENANT) / "host.json").read_text())
+    rep = cs.report(layout, TENANT, cs.HostShape(**{k: tuple(v) if isinstance(v, list) else v for k, v in host.items()}), since="7d")
+    text = rep.text(cs.advise(rep), [])
+    assert "UTC (7.0 days)" in text.splitlines()[0]
+    assert "over this whole 7.0-day window that is ×1.00" in text and "of job researcher's bill)" in text
+    assert "of agent)" not in text
+
+
+def test_a_relative_store_is_where_it_was_when_wrapped(tmp_path, monkeypatch):
+    """The quickstart's store="store" is fixed when wrap is called: a host that changes directory later still writes
+    there."""
+    from recant.store import StoreLayout
+    monkeypatch.chdir(tmp_path)
+    client = wrap(sdk(API()), store="store", tenant=TENANT)
+    (tmp_path / "elsewhere").mkdir()
+    monkeypatch.chdir(tmp_path / "elsewhere")
+    with client.run("agent", session="s"):
+        client.messages.create(model="claude-sonnet-5-5", max_tokens=8, messages=[{"role": "user", "content": "a"}])
+    assert records(StoreLayout(tmp_path / "store")) and not (tmp_path / "elsewhere" / "store").exists()
+
+
+def test_a_share_names_the_default_job_when_it_has_calls_beside_a_named_one(layout):
+    client = wrap(sdk(API()), store=layout, tenant=TENANT)
+    for i in range(3):
+        with client.run(session=f"t{i}"):                                    # wrap's own job, "agent"
+            client.messages.create(model="claude-sonnet-5-5", max_tokens=8, messages=[{"role": "user", "content": f"a {i}"}])
+        with client.run("researcher", session=f"t{i}"):
+            client.messages.create(model="claude-sonnet-5-5", max_tokens=8, messages=[{"role": "user", "content": f"b {i}"}])
+    host = json.loads((layout.costshape_dir(TENANT) / "host.json").read_text())
+    rep = cs.report(layout, TENANT, cs.HostShape(**{k: tuple(v) if isinstance(v, list) else v for k, v in host.items()}), since="7d")
+    text = rep.text(cs.advise(rep), [])
+    assert "jobs agent + researcher's bill" in text

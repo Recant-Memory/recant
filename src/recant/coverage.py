@@ -374,10 +374,30 @@ def verdict_qualifier(s: Optional[dict]) -> tuple[Optional[str], bool]:
 USAGE_FIELDS = ("ts", "model", "tokens_in", "tokens_out", "cache_read", "cache_write")
 
 
+USAGE_NAMES = {"tokens_in": ("tokens_in", "input_tokens"), "tokens_out": ("tokens_out", "output_tokens"),
+               "cache_read": ("cache_read", "cache_read_input_tokens"),
+               "cache_write": ("cache_write", "cache_creation_input_tokens")}   # Recant's names, then the Anthropic SDK's
+
+
+def _utc(ts: str, where: str) -> str:
+    """A line's time on the UTC clock Recant's own records use, so the two are summed by the same day. A time with no
+    offset is taken as UTC."""
+    from datetime import datetime, timezone
+    try:
+        d = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+    except ValueError:
+        raise ValueError(f"{where}: ts {ts!r} is not an ISO time") from None
+    if d.tzinfo is None:
+        d = d.replace(tzinfo=timezone.utc)
+    return d.astimezone(timezone.utc).isoformat(timespec="seconds")
+
+
 def read_usage(path) -> list[dict]:
     """A per-run usage file, JSON lines in the minimal shape (`ts`, `model`, `tokens_in`, `tokens_out`, `cache_read`,
-    `cache_write`, optional `billed`); extra fields are ignored and never stored."""
-    rows = []
+    `cache_write`, optional `billed`; the Anthropic SDK's own names, `input_tokens` and the rest, are read too); extra
+    fields are ignored and never stored. Each `ts` is moved onto UTC. A file with no token field on any line is refused:
+    it would read as "no tokens reported"."""
+    rows, counted = [], False
     with open(path, encoding="utf-8") as f:
         for i, ln in enumerate(f, 1):
             if not ln.strip():
@@ -386,9 +406,16 @@ def read_usage(path) -> list[dict]:
             missing = [k for k in ("ts", "model") if not r.get(k)]
             if missing:
                 raise ValueError(f"{path}:{i}: missing {', '.join(missing)}")
-            rows.append({"ts": r["ts"], "model": r["model"], "tokens_in": int(r.get("tokens_in") or 0),
-                         "tokens_out": int(r.get("tokens_out") or 0), "cache_read": int(r.get("cache_read") or 0),
-                         "cache_write": int(r.get("cache_write") or 0), "billed": r.get("billed")})
+            row = {"ts": _utc(r["ts"], f"{path}:{i}"), "model": r["model"], "billed": r.get("billed")}
+            for ours, names in USAGE_NAMES.items():
+                hit = next((n for n in names if r.get(n) is not None), None)
+                counted = counted or hit is not None
+                row[ours] = int(r.get(hit) or 0) if hit else 0
+            rows.append(row)
+    if not counted:
+        raise ValueError(f"{path}: no line has a token count: the fields are tokens_in, tokens_out, cache_read, cache_write "
+                         "(or the Anthropic SDK's input_tokens, output_tokens, cache_read_input_tokens, "
+                         "cache_creation_input_tokens)")
     return rows
 
 

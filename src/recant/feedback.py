@@ -80,13 +80,16 @@ ENUMS = {"commit_from": {"source checkout", "install record", "release build", "
                                                                 "the manifest only: this machine's friction log has no entry for the run"}}
 
 
+_JOBS: dict = {}                             # a bundle's job names to their numbers: reset per bundle, never written
+
+
 def lever_id(s: str) -> Optional[str]:
     """A lever id, its job or key suffix kept only when it is Recant's default ("agent"); otherwise "<job>"/"<key>"."""
     if s in LEVERS:
         return s
     m = _BY_JOB.match(s)
-    if m:
-        return s if m.group(2) == "agent" else f"{m.group(1)}.<job>"
+    if m:                                    # jobs numbered within the bundle, so two jobs' levers are told apart
+        return s if m.group(2) == "agent" else f"{m.group(1)}.<job {_JOBS.setdefault(m.group(2), len(_JOBS) + 1)}>"
     m = _BY_KEY.match(s)
     if m:
         return f"{m.group(1)}.<key>"
@@ -147,20 +150,21 @@ def scrub_string(s: str, field: Optional[str]) -> Optional[str]:
     return None
 
 
-def scrub(x, *, field: Optional[str] = None, dropped: Optional[list] = None):
+def scrub(x, *, field: Optional[str] = None, dropped: Optional[list] = None, at: str = ""):
     """The bundle's projection: numbers, booleans and None as they are; a string only when its field's rule passes it; a
     dict's keys only when they are Recant's field names (an unknown key is dropped, counted, never kept); a dict keyed
-    by data becomes a list of its values; error classes as `error_name` gives them."""
+    by data becomes a list of its values; error classes as `error_name` gives them. `dropped` gets the path of each
+    string left out, Recant's field names and list positions only (an unknown key is written `<key>`)."""
     dropped = dropped if dropped is not None else []
     if isinstance(x, bool) or x is None or isinstance(x, (int, float)):
         return x
     if isinstance(x, str):
         out = scrub_string(x, field)
         if out is None:
-            dropped.append(1)
+            dropped.append(at or "(top)")
         return out
     if isinstance(x, (list, tuple)):
-        return [scrub(v, field=field, dropped=dropped) for v in x]
+        return [scrub(v, field=field, dropped=dropped, at=f"{at}[{i}]") for i, v in enumerate(x)]
     if isinstance(x, dict):
         if field in ("errors", "wrapper_errors"):
             merged: dict = {}
@@ -169,15 +173,15 @@ def scrub(x, *, field: Optional[str] = None, dropped: Optional[list] = None):
                 merged[k2] = merged.get(k2, 0) + (v if isinstance(v, (int, float)) and not isinstance(v, bool) else 0)
             return merged
         if field in LISTED_BY_VALUE:
-            return {"values": [scrub(v, dropped=dropped) for v in x.values()]}
+            return {"values": [scrub(v, dropped=dropped, at=f"{at}.values[{i}]") for i, v in enumerate(x.values())]}
         out = {}
         for k, v in x.items():
             if isinstance(k, str) and k in FIELDS:
-                out[k] = scrub(v, field=k, dropped=dropped)
+                out[k] = scrub(v, field=k, dropped=dropped, at=f"{at}.{k}" if at else k)
             else:
-                dropped.append(1)
+                dropped.append(f"{at}.<key>" if at else "<key>")
         return out
-    dropped.append(1)
+    dropped.append(at or "(top)")
     return None
 
 
@@ -203,6 +207,7 @@ def features(reports: list[dict]) -> dict:
 
 def build(*, bench_dirs: list[Path], eval_dirs: list[Path], cost_json: Optional[dict] = None, form: Optional[dict] = None) -> tuple[dict, int]:
     reports = _reports(bench_dirs) + _reports(eval_dirs)
+    _JOBS.clear()
     dropped: list = []
     body = {"bundle": "recant-feedback", "written": datetime.now(timezone.utc).strftime("%Y-%m-%d"), "recant": version_info(),
             "python": platform.python_version(), "os": platform.system(), "machine": platform.machine(),
@@ -210,17 +215,26 @@ def build(*, bench_dirs: list[Path], eval_dirs: list[Path], cost_json: Optional[
     clean = scrub(body, dropped=dropped)
     if form:
         clean["form"] = {k: str(v) for k, v in form.items()}          # the developer's own words, shown back before writing
+    build.left_out = list(dropped)               # where, for the terminal only
     return clean, len(dropped)
 
 
 QUESTIONS = [
     ("minutes_to_first_report", "Minutes from install to your first report"),
-    ("had_to_read_code_or_guess", "Where did you have to read Recant's code, guess, or search? (one line each)"),
+    ("had_to_read_code_or_guess", "Where did you have to read Recant's code, guess, or search? (on one line, ';' between items)"),
     ("errors_hit", "Which errors did you hit?"),
     ("could_not_measure", "What did you want to measure that the kit couldn't?"),
     ("leave_it_on", "Would you leave Recant on? yes / no / not yet, and why"),
     ("anything_else", "Anything else"),
 ]
+
+
+def _tty() -> bool:
+    import sys
+    try:
+        return sys.stdin.isatty()
+    except (AttributeError, ValueError):
+        return False
 
 
 def ask_form(ask: Callable = input, say: Callable = print) -> dict:
@@ -236,6 +250,8 @@ def ask_form(ask: Callable = input, say: Callable = print) -> dict:
     for key, q in QUESTIONS:
         hint = f" [{pre[key]}]" if pre.get(key) not in (None, "") else ""
         a = ask(f"{q}{hint}: ").strip()
+        if not _tty():
+            say("")                              # piped answers: each prompt on its own line
         if a or hint:
             out[key] = a or str(pre[key])
     return out
@@ -248,7 +264,9 @@ def run(*, bench_dirs, eval_dirs, cost_json=None, out_dir: Path = Path("."), for
     bundle, dropped = build(bench_dirs=bench_dirs, eval_dirs=eval_dirs, cost_json=cost_json, form=answers)
     text_ = json.dumps(bundle, indent=1, ensure_ascii=False)
     say(text_)
-    say(f"({dropped} strings left out by the allow-list: text, paths and names never go in the bundle)")
+    where = getattr(build, "left_out", [])
+    say(f"({dropped} strings left out by the allow-list: text, paths and names never go in the bundle"
+        + (f"; at: {', '.join(where[:12])}{' …' if len(where) > 12 else ''}" if where else "") + ")")
     if ask("Write this bundle? [y/N] ").strip().lower() not in ("y", "yes"):
         say("Nothing written.")
         return None

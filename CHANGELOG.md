@@ -4,6 +4,41 @@ What changed in each version, and the measurements behind the numbers the README
 comments use. Each measurement says what it was run on; none of it is a promise about your traffic. Measure your own
 with `recant bench` and `recant eval memory`.
 
+## 0.3.3
+
+From a second outside developer's run of the whole kit on 0.3.2, on the same kind of app (November 2026). Each item is
+something they hit; two are 0.3.2 fixes that did not take.
+
+- **`recant coverage --usage`** read a file in the Anthropic SDK's own field names (`input_tokens`, …) as "no tokens
+  reported", and a time with a `+01:00` offset just after local midnight as "Recant saw 0%": the file's lines were
+  summed by their local day, Recant's records by UTC's. It now reads the SDK's names, refuses a file with no token
+  count, and puts every line on its UTC day.
+- **`recant bench --client`** called the function with an argument nothing documented, and a function taking none
+  crashed with a traceback. It may take none or `is_async`, and a wrong one is a one-line error.
+- **A safe arm's quality rests on equivalence.** Its levers change only cache markers; with the input identical on
+  every call, the verdict says so and gives the pass rate as context. One task in 30 pairs that failed in the safe arm
+  had read "quality NOT held". An arm with an opted-in lever is still held to the interval.
+- **Drafted keys** (0.3.2's prompt change did not take: the drafter still wrote a key with a word the answer need not
+  repeat, and the developer trimmed 6 of 26 by hand): `--make-questions` now lists each key longer than two words, or
+  holding words its question already says, with a suggested shorter key to take or leave; it changes no key by itself,
+  since a word the question says, or a leading "A", can be part of the value. A drafted question whose quote is itself a question is dropped, and
+  absent questions are held to a third of a scope's kept questions, rounded up.
+- **Who is asking.** A session line may carry `name` (default: the scope after its colon), and every arm's answering
+  prompt says who is asking; memory v2 had held a person's facts without knowing the asker was that person.
+- **`recant eval memory --estimate`** runs every arm on the first scope only and prints the whole run's spend. With
+  fewer than 10 scopes, the verdict says its intervals (which resample whole scopes) mean little; over 3 they had read
+  100% to 100%.
+- **Weekly figures** (0.3.2's header did not explain them): the levers header gives the window's own scale factor, and
+  a share names the jobs it is of.
+- **Progress** reaches a log file or CI line by line (it was block-buffered when stdout was not a terminal).
+- **`results.jsonl`** keeps the start of each task's `repr(result)`, so a failed task can be looked at; it stays local.
+- **The feedback bundle** numbers two jobs' levers (`effort.<job 1>`, `effort.<job 2>`) instead of writing both as
+  `effort.<job>`, and the terminal says where the allow-list left strings out.
+- **A relative `store=`** is fixed when you wrap, so a later change of directory does not move it.
+- **`recant --version` from PyPI** names the commit the release was built from (`release build`; deferred from 0.3.2).
+- The README now says what `session=` is for, what a line of `sessions.jsonl` is, how a run carries into
+  `asyncio.to_thread`, and that an `--estimate` directory resumes.
+
 ## 0.3.2
 
 From an outside developer's first run of the whole kit, on their own two-agent app (a streamed async researcher on

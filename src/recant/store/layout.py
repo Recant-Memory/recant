@@ -35,7 +35,7 @@ def check_entry_id(entry_id: str) -> str:
 
 class StoreLayout:
     def __init__(self, root: str | Path):
-        self.root = Path(root)
+        self.root = Path(root).absolute()        # fixed when made: a later chdir never moves the store
 
     # tenant-scoped -----------------------------------------------------
     def tenant_dir(self, tenant: str) -> Path:

@@ -26,6 +26,7 @@ def test_no_commit_is_said_in_words():
         "0.3.2 (commit not recorded in this install)"
 
 
-def test_the_package_ships_a_recorded_commit_when_the_build_writes_one():
+def test_the_workflow_writes_the_commit_and_the_wheel_ships_it():
     root = Path(__file__).resolve().parents[1]                       # the repository, not the installed package
+    assert 'echo "$GITHUB_SHA" > src/recant/_commit' in (root / ".github/workflows/publish.yml").read_text()
     assert '"_commit"' in (root / "pyproject.toml").read_text()

@@ -1,7 +1,7 @@
 """Which Recant this is: the version and the commit, for `recant --version` and every report and
-bundle header. Installed from git (`pip install git+…@<tag>`), pip keeps the commit in the install record; a build that
-writes `_commit` into the package carries the commit it was built from; from a source checkout, git is asked; otherwise
-the commit is "unknown", and every header says so in words."""
+bundle header. Installed from git (`pip install git+…@<tag>`), pip keeps the commit in the install record; a release
+from PyPI carries the commit it was built from (`_commit`, written by the publish workflow); from a source checkout, git
+is asked; otherwise the commit is "unknown", and every header says so in words."""
 from __future__ import annotations
 
 import json

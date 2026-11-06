@@ -58,6 +58,7 @@ SPEAKER = {"user": "Person", "assistant": "Assistant"}
 DONT_KNOW = re.compile(r"\b(i\s+)?(don'?t|do not|cannot|can'?t)\s+know\b|\bnot\s+(stated|mentioned|recorded|in (my|the) (notes|memory|records))\b|"
                        r"\bno (record|information|note)s?\b|\bunknown\b", re.I)
 
+MIN_SCOPES_FOR_INTERVALS = 10         # an interval clustered by scope says little over fewer (3 scopes gave 100% to 100%)
 ANSWER_SYSTEM = ("You are the assistant this person works with. Answer the question from what you know of them below, "
                  "if anything. Be brief. End with one line: `ANSWER: <the answer in a few words>`, or `ANSWER: I don't know` "
                  "when nothing below says.")
@@ -108,7 +109,8 @@ def load_sessions(path: Optional[str] = None, hook: Optional[Callable] = None) -
             for role, t in _text(m.get("content")):
                 if t.strip():
                     turns.append({"role": role or m.get("role", "user"), "text": t.strip()})
-        out.append({"scope": str(r["scope"]), "ts": str(r["ts"]), "turns": turns})
+        name = r.get("name") if isinstance(r.get("name"), str) and r["name"].strip() else str(r["scope"]).split(":", 1)[-1]
+        out.append({"scope": str(r["scope"]), "ts": str(r["ts"]), "turns": turns, "name": name.strip()})
     return sorted(out, key=lambda s: (s["scope"], s["ts"]))
 
 
@@ -164,14 +166,51 @@ def make_questions(sessions: list[dict], *, raw, model: str, out_path: str, root
         except (ValueError, KeyError):
             qs = []
             dropped.append({"scope": scope, "reason": "the model's reply was not the JSON asked for"})
-        for n, q in enumerate(qs):
-            why = check_question(q, ss)
+        checked = [(n, q, check_question(q, ss)) for n, q in enumerate(qs)]
+        facts = sum(1 for _, q, why in checked if why is None and q.get("kind") != "absent")
+        absent_cap = 0                                                  # absent at most a third of what is kept,
+        while absent_cap + 1 <= -(-(facts + absent_cap + 1) // 3):      # rounded up
+            absent_cap += 1
+        absent_kept = 0
+        for n, q, why in checked:
+            if why is None and q.get("kind") == "absent":
+                absent_kept += 1
+                if absent_kept > absent_cap:
+                    why = f"more than a third of this scope's kept questions would be absent ({absent_cap} kept)"
             row = {"id": f"q-{slug(scope)}-{n}", "scope": scope, "kind": q.get("kind"), "question": q.get("question"),
                    "answer": q.get("answer"), "quote": q.get("quote") or "", "session": q.get("session") or 0}
+            if why is None and row["kind"] in ("recall", "update"):
+                suggested = trim_key(row["question"], row["answer"])    # listed, never applied: no key is changed
+                if suggested != row["answer"]:                          # a suggestion only: a word the question says can
+                    row["answer_suggested"] = suggested                 # still be part of the value ("New York Avenue")
             (dropped if why else kept).append({**row, "reason": why} if why else row)
     Path(out_path).write_text("".join(json.dumps(q, ensure_ascii=False) + "\n" for q in kept))
+    long_keys = [{"id": q["id"], "answer": q["answer"], **({"suggested": q["answer_suggested"]} if "answer_suggested" in q else {})}
+                 for q in kept if q["kind"] in ("recall", "update") and (len(q["answer"].split()) > 2 or "answer_suggested" in q)]
     return {"kept": len(kept), "dropped": dropped, "path": out_path,
-            "by_kind": {k: sum(q["kind"] == k for q in kept) for k in KINDS}}
+            "by_kind": {k: sum(q["kind"] == k for q in kept) for k in KINDS},
+            "keys_with_a_suggestion": sum(1 for q in kept if "answer_suggested" in q),
+            "keys_to_check": long_keys}
+
+
+def _words(s: str) -> list[str]:
+    return re.findall(r"[a-z0-9]+", (s or "").lower())
+
+
+def trim_key(question: str, key: str) -> str:
+    """A suggested shorter key: the drafted one less the words at its ends that its question already says, and a
+    leading article ("Project Juniper" for "Which project do I manage?" suggests "Juniper"). Only a suggestion, listed for
+    the developer: a word the question says can still be part of the value ("New York Avenue" for "my New York office
+    address"), so no key is changed by it. A key that would be left empty is kept."""
+    asked = set(_words(question))
+    said = lambda w: bool(set(_words(w))) and set(_words(w)) <= asked          # noqa: E731
+    kept = key.split()
+    while kept and (said(kept[0]) or _words(kept[0]) in (["the"], ["a"], ["an"])):   # from the ends only: a word in the
+        kept = kept[1:]                                                              # middle can be part of the value
+    while kept and said(kept[-1]):                                                   # ("10 New York Avenue")
+        kept = kept[:-1]
+    out = " ".join(kept).strip(" ,;:.")
+    return out or key
 
 
 def check_question(q: dict, ss: list[dict]) -> Optional[str]:
@@ -191,6 +230,8 @@ def check_question(q: dict, ss: list[dict]) -> Optional[str]:
         return "the quote is not the person's own words in that session"
     if not notes.holds(q["quote"], q["answer"]):
         return "the answer is not in the quote"
+    if (q.get("quote") or "").strip().endswith("?"):
+        return "the quote is a question the person asked, not a fact they stated"
     return None
 
 
@@ -395,6 +436,29 @@ def _built(arm_root: Path, scope: str, build: Callable) -> dict:
     return info
 
 
+def estimate(sessions: list[dict], questions_path: str, *, raw, model: str, out: str, arms=ARMS,
+             window_tokens: int = 150_000, extract_client=None) -> dict:
+    """The whole run's spend, from every arm run on the first scope only (it spends that scope's share): each arm's
+    answers scaled by the question count, its write path by the scope count."""
+    qs = [json.loads(x) for x in Path(questions_path).read_text().splitlines() if x.strip()]
+    scopes = by_scope(sessions)
+    asked = [s for s in scopes if any(q["scope"] == s for q in qs)]
+    if not asked:
+        raise SystemExit("no question names a scope in the sessions")
+    first = asked[0]
+    root = Path(out)
+    root.mkdir(parents=True, exist_ok=True)
+    qp = root / "questions.jsonl"
+    qp.write_text("".join(json.dumps(q, ensure_ascii=False) + "\n" for q in qs if q["scope"] == first))
+    rep = evaluate(scopes[first], str(qp), raw=raw, model=model, out=str(root), arms=arms, window_tokens=window_tokens,
+                   extract_client=extract_client, say=lambda *_: None)
+    n_first = sum(1 for q in qs if q["scope"] == first)
+    est = sum(v["cost"]["answers_usd"] / max(1, n_first) * len(qs) + v["cost"]["write_path_usd"] * len(asked)
+              for v in rep["arms"].values())
+    return {"estimated_usd": est, "spent_usd": rep["total_spend_usd"], "questions": len(qs), "questions_run": n_first,
+            "scopes": len(asked), "arms": list(rep["arms"])}
+
+
 def evaluate(sessions: list[dict], questions_path: str, *, raw, model: str, out: str, arms=ARMS, window_tokens: int = 150_000,
              extract_client=None, say: Callable = print, parallel: int = 1) -> dict:
     """Every answer is written as it lands and every built store marked, so a stopped run resumes where it stopped,
@@ -464,7 +528,8 @@ def evaluate(sessions: list[dict], questions_path: str, *, raw, model: str, out:
             if mv is not None:
                 f = fit(mv[0], family=None, serve=mv[1], view="as_reviewed", question=q["question"])
                 c = f["core_text"] + ("\n\n" + f["slice_text"] if f["slice_text"] else "")
-            system = ANSWER_SYSTEM + ("\n\n" + c if c else "")
+            who = (ss[0].get("name") or scope.split(":", 1)[-1]) if ss else scope
+            system = ANSWER_SYSTEM + f"\n\nThe person asking is {who}." + ("\n\n" + c if c else "")
             with answers.run("answer", session=f"{arm}:{q['id']}"):
                 try:
                     r = answers.messages.create(model=model, max_tokens=1024, system=system,
@@ -585,10 +650,18 @@ def verdict(r: dict) -> list[str]:
     best = min(ok, key=lambda x: x[1])
     for k, v in a.items():                             # the words-only score first, the value match beside it
         ah = v.get("against_history")
-        lines.append(f"{k}: {v['accuracy_words_only']:.1%} words only (95% {v['interval_words_only'][0]:.1%} to "
-                     f"{v['interval_words_only'][1]:.1%}), {v['accuracy']:.1%} value match (95% {v['interval'][0]:.1%} to "
-                     f"{v['interval'][1]:.1%}), ${v['cost']['per_question_usd']:.4f} a question"
+        same = abs(v["accuracy_words_only"] - v["accuracy"]) < 1e-12
+        score = (f"{v['accuracy_words_only']:.1%} (words only and value match) (95% {v['interval'][0]:.1%} to "
+                 f"{v['interval'][1]:.1%})") if same else \
+            (f"{v['accuracy_words_only']:.1%} words only (95% {v['interval_words_only'][0]:.1%} to "
+             f"{v['interval_words_only'][1]:.1%}), {v['accuracy']:.1%} value match (95% {v['interval'][0]:.1%} to "
+             f"{v['interval'][1]:.1%})")
+        lines.append(f"{k}: {score}, ${v['cost']['per_question_usd']:.4f} a question"
                      + (f"; against history, value match, {ah['difference'] * 100:+.1f} points ({ah['verdict']})" if ah else ""))
+    k_scopes = r["header"].get("scopes") or 0
+    if k_scopes < MIN_SCOPES_FOR_INTERVALS:
+        lines.append(f"{k_scopes} scopes: the intervals resample whole scopes, and {k_scopes} are too few for them to mean much "
+                     f"(at least {MIN_SCOPES_FOR_INTERVALS}); read the differences, question by question, not the intervals")
     lines.append(f"cheapest arm holding quality against carried history, on value match: {best[0]} (${best[1]:.4f} a question)")
     if r.get("total_spend_usd") is not None:
         lines.append(f"total spend: ${r['total_spend_usd']:.2f} at list prices (answers and write paths, every arm)")

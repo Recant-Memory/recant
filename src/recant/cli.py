@@ -81,7 +81,10 @@ def run_coverage(usage_path, store=None, tenant=None, *, prices=None, as_json=Fa
     from . import costshape as cs_
     from . import coverage
     from .log import read_run
-    rows = coverage.read_usage(usage_path)
+    try:
+        rows = coverage.read_usage(usage_path)
+    except (OSError, ValueError) as exc:
+        raise SystemExit(f"--usage: {exc}")
     days = {r["ts"][:10] for r in rows}
     calls = []
     if store:
@@ -105,6 +108,10 @@ def main(argv=None) -> int:
     """Every command appends to the friction log: when, which, and how it failed."""
     from . import friction
     argv = list(sys.argv[1:] if argv is None else argv)
+    try:                                                 # progress lines reach a log file or CI as they happen, not in
+        sys.stdout.reconfigure(line_buffering=True)      # 4 KB blocks
+    except (AttributeError, ValueError):
+        pass
     friction.started(argv)
     try:
         code = _main(argv)
@@ -160,7 +167,8 @@ def _main(argv) -> int:
     b.add_argument("--arm-b", help="arm B, overriding --mode: off (an A/A run), safe, or safe+<lever id> (an opted-in lever)")
     b.add_argument("--out", help="the bench directory; default bench/<run id>; an existing one resumes")
     b.add_argument("--store", help="start the Recant arm from a copy of this store (the report says so)")
-    b.add_argument("--client", help="module:function returning your raw client (sync or async); default anthropic's")
+    b.add_argument("--client", help="module:function returning your raw client: called as make_client() or make_client(is_async) (True when "
+                   "run_task is async def); default anthropic.Anthropic / AsyncAnthropic")
     b.add_argument("--prices", help="a price table, as for recant cost")
     b.add_argument("--yes", action="store_true", help="do not ask before spending the estimate")
     b.add_argument("--parallel", type=int, default=1, help="tasks in flight at once, for a sync run_task (an async one runs its own work concurrently); each task still "
@@ -180,6 +188,8 @@ def _main(argv) -> int:
     em.add_argument("--window", type=int, default=150_000, help="carried history's window, in estimated tokens; default 150000")
     em.add_argument("--out", help="the eval directory; default eval/<UTC stamp>; an existing one resumes")
     em.add_argument("--parallel", type=int, default=1, help="scopes built and answered at once; default 1")
+    em.add_argument("--estimate", action="store_true", help="run every arm on the first scope only (under --out/estimate), "
+                    "print the whole run's estimated spend, stop")
     cv = sub.add_parser("coverage", help="what Recant saw of your traffic, against your own per-run totals (costs nothing)")
     cv.add_argument("--usage", required=True, help="your per-run log, JSON lines: ts, model, tokens_in, tokens_out, cache_read, "
                                                    "cache_write, optional billed (api_key | subscription)")
@@ -225,9 +235,23 @@ def _main(argv) -> int:
             print(json.dumps(r, indent=1, default=str))
             print(f"questions written: {Path(a.questions).resolve()} (--questions); the drafting calls were metered in "
                   f"{(out / 'questions-store').resolve()} (--out)")
+            if r.get("keys_to_check"):
+                print(f"{len(r['keys_to_check'])} keys to check (longer than two words, or holding words their question "
+                      "already says): each must hold the value and only the value (every word of a key must be in the "
+                      "reply). A suggestion drops the question's words from the key's ends; take it only where those "
+                      "words are not part of the value. Nothing was changed:")
+                for k in r["keys_to_check"]:
+                    print(f"  {k['id']}: {k['answer']}" + (f"   (suggested: {k['suggested']})" if k.get("suggested") else ""))
             print(f"read and edit {a.questions}: each answer is the fewest words the reply must contain (a recall or update "
                   "question is scored on its key's words); the file is hashed when scoring starts. Then run the same "
                   "command without --make-questions.")
+            return 0
+        if a.estimate:
+            est = em_.estimate(sessions, a.questions, raw=raw_sdk(False), model=a.model, out=str(out / "estimate"),
+                               arms=tuple(a.arms.split(",")), window_tokens=a.window)
+            print(f"recant eval memory: estimated spend ${est['estimated_usd']:.2f} for {est['questions']} questions over "
+                  f"{est['scopes']} scopes and {len(est['arms'])} arms (the first scope ran: ${est['spent_usd']:.2f} for "
+                  f"{est['questions_run']} questions; answers scaled by questions, write paths by scopes). Nothing else ran.")
             return 0
         em_.evaluate(sessions, a.questions, raw=raw_sdk(False), model=a.model, out=str(out), arms=tuple(a.arms.split(",")),
                      window_tokens=a.window, parallel=a.parallel)

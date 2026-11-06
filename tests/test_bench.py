@@ -256,3 +256,68 @@ def test_a_report_rebuilt_at_other_prices_restates_both_sides_of_each_prediction
             assert kb[k]["ratio"] == pytest.approx(ka[k]["ratio"], rel=5e-3), k   # check() rounds dollars to 4 places
     cpt = kb[("A", "cost per task")]
     assert cpt["predicted_usd"] == pytest.approx(10 * ka[("A", "cost per task")]["predicted_usd"], rel=1e-6)
+
+
+def test_a_client_hook_may_take_no_argument_or_is_async(setup):
+    tmp, tasks = setup
+    (tmp / "client_hooks.py").write_text("import test_bench\n"
+                                     "def make0():\n    return test_bench.SimAPI()\n"
+                                     "def make1(is_async):\n    assert is_async is False\n    return test_bench.SimAPI()\n"
+                                     "def broken(a, b):\n    return None\n")
+    for spec in ("client_hooks:make0", "client_hooks:make1"):
+        out = bench.run(tasks_path=tasks(6), run_spec="bench_agent:run_task", out=str(tmp / spec.split(":")[1]), estimate_only=True,
+                        calibrate=2, client_spec=spec, say=lambda *_: None)
+        assert out["estimate"]["first_task_usd"] > 0
+    with pytest.raises(SystemExit, match="make_client\\(\\) or, if it takes one argument, make_client\\(is_async\\)"):
+        bench.run(tasks_path=tasks(6), run_spec="bench_agent:run_task", out=str(tmp / "broken"), estimate_only=True,
+                  calibrate=2, client_spec="client_hooks:broken", say=lambda *_: None)
+
+
+def test_a_safe_arm_s_quality_rests_on_equivalence_when_it_fails_no_more_than_the_other(setup):
+    """A safe arm changes only cache markers; with equivalence on every call and no more failures than the other arm,
+    its quality is unchanged by construction (an outside developer's 0.3.2 bench read 'quality NOT held' on one task
+    the model answered differently)."""
+    tmp, tasks = setup
+    rep, lines = go(tasks(12), tmp / "eqq", SimAPI(), calibrate=3)
+    q, = [x for x in rep["verdict"] if x.startswith("quality")]
+    assert q.startswith("quality: unchanged by construction") and "equivalence" in q and "as context" in q
+
+
+def test_a_safe_arm_that_fails_more_is_judged_on_the_interval(setup):
+    """Equivalence says the input was the same, not that the arm ran as well: a safe arm whose runs fail more (cache
+    markers a provider refuses, a timeout) is held to the interval."""
+    tmp, tasks = setup
+    rep, lines = go(tasks(12, explode={6, 9}), tmp / "eqf", SimAPI(), calibrate=3)
+    q, = [x for x in rep["verdict"] if x.startswith("quality")]
+    assert not q.startswith("quality: unchanged by construction") and "pass rate" in q
+
+
+def test_each_task_run_keeps_what_run_task_returned_to_look_at(setup):
+    tmp, tasks = setup
+    go(tasks(6, explode={4}), tmp / "res2", SimAPI(), calibrate=2)
+    rows = [json.loads(x) for x in (tmp / "res2" / "results.jsonl").read_text().splitlines()]
+    ok = [r for r in rows if not r["error"]]
+    assert ok and all(r["result"] == "8" for r in ok)                          # run_task returns len(msgs)
+    failed = [r for r in rows if r["error"]]
+    assert failed and all(r["result"] is None for r in failed)
+
+
+def test_the_loss_guard_reads_the_interval_for_whichever_arm_is_safe(setup):
+    """The interval is B minus A: a safe arm A that lost shows as an interval wholly above zero."""
+    import copy
+    tmp, tasks = setup
+    rep, _ = go(tasks(10), tmp / "ord", SimAPI(), calibrate=3)
+    r = copy.deepcopy(rep)
+    r["header"]["arms"] = {"A": "safe", "B": "off"}
+    r["equivalence"] = {"A": {"equivalent": 50, "not_equivalent": 0}, "B": {"equivalent": 0, "not_equivalent": 0}}
+    r["quality"] = dict(r["quality"], pass_rate={"A": 0.0, "B": 1.0}, difference=1.0, interval=(1.0, 1.0))
+    q, = [x for x in bench.verdict_lines(r) if x.startswith("quality")]
+    assert not q.startswith("quality: unchanged by construction")
+    r["quality"] = dict(r["quality"], pass_rate={"A": 1.0, "B": 1.0}, difference=0.0, interval=(0.0, 0.0))
+    q, = [x for x in bench.verdict_lines(r) if x.startswith("quality")]
+    assert q.startswith("quality: unchanged by construction")
+    r["header"]["arms"] = {"A": "safe", "B": "safe"}                     # safe against safe: no baseline, the interval
+    r["equivalence"] = {"A": {"equivalent": 50, "not_equivalent": 0}, "B": {"equivalent": 50, "not_equivalent": 0}}
+    r["quality"] = dict(r["quality"], pass_rate={"A": 0.0, "B": 1.0}, difference=1.0, interval=(1.0, 1.0))
+    q, = [x for x in bench.verdict_lines(r) if x.startswith("quality")]
+    assert not q.startswith("quality: unchanged by construction")

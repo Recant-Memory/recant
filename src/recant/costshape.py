@@ -561,9 +561,10 @@ class Lever:
     action: dict = field(default_factory=dict)
     note: str = ""
 
-    def line(self) -> str:
+    def line(self, agent: str = "agent") -> str:
         usd = f"${self.saves_usd:,.2f}/wk" if self.saves_usd is not None else "unpriced"
-        sh = f" ({-self.share:+.1%} of {self.job})" if self.share is not None else ""
+        whose = agent if self.job == "agent" else f"job {self.job}"
+        sh = f" ({-self.share:+.1%} of {whose}'s bill)" if self.share is not None else ""
         return f"{self.state:15} {self.id:28} {usd:>12}{sh}  {self.note}"
 
 
@@ -660,22 +661,28 @@ class Report:
         labelled automatic, opt-in or pointed out; a section with nothing to say says so."""
         days = (self.until - self.since) / 86400
         out = [f"recant cost: {self.host.label}, {datetime.fromtimestamp(self.since, timezone.utc):%m-%d} to "
-               f"{datetime.fromtimestamp(self.until, timezone.utc):%m-%d} ({days:.1f} days)"]
+               f"{datetime.fromtimestamp(self.until, timezone.utc):%m-%d} UTC ({days:.1f} days)"]
         from . import coverage as cov
         out.append(cov.line(self.coverage(), watched=self.watched))
         levers = levers or []
         by = {sec: [lv for lv in levers if section_of(lv) == sec] for sec in ("cost", "quality", "health")}
 
+        has_default = any(c["job"] == "agent" for c in self.calls)          # the default job named when it has calls
+        jobs = sorted(set(self.host.agent_jobs) - ({"agent"} if not has_default else set())) or ["agent"]
+        agent = "job " + jobs[0] if len(jobs) == 1 else "jobs " + " + ".join(jobs)
+
         def items(ls):
-            return ["  " + f"{label_of(lv):12} " + lv.line() for lv in ls]
+            return ["  " + f"{label_of(lv):12} " + lv.line(agent) for lv in ls]
         out.append("\n== cost ==")
         out.append(render(self.shape, title=self.host.label))
         leaks = [lv for lv in by["cost"] if lv.kind == "fix_cause"]
         out.append("leaks found:" if leaks else "leaks found: none")
         out += items(leaks)
         rest = [lv for lv in by["cost"] if lv.kind != "fix_cause"]
-        out.append("levers (dollars a week at the rate of the calls each is priced on: its job's calls since their settings last "
-                   "changed, a span under a day counted as a day):" if rest else "levers: none sized in this window")
+        out.append(f"levers ($/wk: each lever's saving on the calls it is priced on, scaled to a week; over this whole "
+                   f"{days:.1f}-day window that is \u00d7{self.per_week:.2f}, and a lever priced from a later settings change is "
+                   f"scaled from that shorter span, a span under a day counted as a day):" if rest else
+                   "levers: none sized in this window")
         out += items(sorted(rest, key=lambda lv: ({"automatic": 0, "opt-in": 1}.get(label_of(lv), 2), -(lv.saves_usd or 0))))
         checks = [e for e in (ledger or []) if e.get("event") == "checked"]
         if checks:
@@ -1364,7 +1371,9 @@ def detect_output_cap(rep: Report) -> list[Lever]:
             usd = sum(r.cost(c) for c in hit)
             out.append(Lever(f"fix.output_cap.{job}", "fix_cause", job, sum(c["output"] for c in hit) * r.per_week, usd * r.per_week,
                              None, False, state="finding", evidence={"stopped": len(hit), "calls": len(cs), "p999_output": p999},
-                             note=f"{len(hit)} calls stopped at the output cap; set the cap above p99.9 = {p999:,}"))
+                             note=(f"{len(hit)} of {len(cs)} {'call' if len(cs) == 1 else 'calls'} stopped at the output "
+                                   f"cap: {'its' if len(hit) == 1 else 'their'} output was cut short, so the cap is below what "
+                                   "the answers need: raise it")))
     return out
 
 

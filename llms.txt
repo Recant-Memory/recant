@@ -73,8 +73,8 @@ the reference client use.
   typed, shown first; nothing is sent. The friction log is `~/.recant/friction.jsonl` (or `$RECANT_HOME`).
 - `recant off [--meter] | on | status --store DIR` (or `RECANT=off|meter|on`, which overrides the store's file) — the
   switch, read on every call.
-- `recant --version` — version and, where recorded, the commit (not recorded in a PyPI install); every report and
-  bundle header carries them.
+- `recant --version` — version and the commit it was built from (a PyPI release names it, 0.3.3 on); every report
+  and bundle header carries them.
 
 ## Managed notes (the default memory)
 

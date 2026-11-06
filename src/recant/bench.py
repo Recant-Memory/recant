@@ -212,6 +212,20 @@ def _priced(rep, calls) -> tuple[float, int]:
 
 
 # ---------------------------------------------------------------- running tasks
+RESULT_KEPT = 2000          # characters of each task's repr(result) kept in results.jsonl
+
+
+def _takes_an_argument(fn) -> bool:
+    """Whether a --client function takes is_async (one positional parameter, or more), or nothing."""
+    import inspect
+    try:
+        ps = [p for p in inspect.signature(fn).parameters.values()
+              if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD, p.VAR_POSITIONAL)]
+    except (TypeError, ValueError):
+        return True
+    return bool(ps)
+
+
 def load_hook(spec: Optional[str]) -> Optional[Callable]:
     if not spec:
         return None
@@ -260,7 +274,12 @@ class Runner:
                 score = float(self.grade(task, result))
             except Exception as exc:                                # noqa: BLE001
                 err = f"grade:{type(exc).__name__}"
-        return {"task": i, "arm": arm.name, "attempt": attempt, "started": t0, "ended": time.time(), "error": err, "score": score}
+        try:                                                         # what run_task returned, for looking at a task
+            shown = None if err and result is None else repr(result)[:RESULT_KEPT]   # (local only: never in the bundle)
+        except Exception:                                            # noqa: BLE001
+            shown = None
+        return {"task": i, "arm": arm.name, "attempt": attempt, "started": t0, "ended": time.time(), "error": err, "score": score,
+                "result": shown}
 
     def close(self):
         if self.loop is not None:
@@ -375,7 +394,15 @@ def run(*, tasks_path: str, run_spec: str, grade_spec: Optional[str] = None, n: 
         raise SystemExit(f"{len(tasks)} tasks leave none to compare after {calibrate} calibration tasks")
     runner = Runner(load_hook(run_spec), load_hook(grade_spec))
     make_raw = sdk_factory or load_hook(client_spec) or default_client
-    raw = lambda: make_raw(runner.is_async)                          # noqa: E731 — one raw client per arm
+    takes_mode = _takes_an_argument(make_raw)
+
+    def raw():                                                       # one raw client per arm
+        try:
+            return make_raw(runner.is_async) if takes_mode else make_raw()
+        except TypeError as exc:
+            raise SystemExit(f"--client {client_spec}: {exc}. The function is called as make_client() or, if it takes "
+                             "one argument, make_client(is_async), True when run_task is async def; it returns a raw "
+                             "anthropic.Anthropic or AsyncAnthropic") from None
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + hashlib.sha256(os.urandom(8)).hexdigest()[:4]
     root = Path(out) if out else Path("bench") / run_id
     root.mkdir(parents=True, exist_ok=True)
@@ -808,7 +835,31 @@ def verdict_lines(r: dict) -> list[str]:
                      + (f"; on the {bs['pairs']} pairs where both succeeded the difference is ${bs['delta']:+.4f} a task"
                         if bs else "; no pair succeeded in both arms"))
     q = r.get("quality")
-    if q is None:
+    specs = r["header"]["arms"]
+    eq = r.get("equivalence") or {}
+    markers_only = sorted((specs["A"], specs["B"])) == ["off", "safe"]   # a safe arm against an off one; any other pair
+                                                                          # (safe against safe, an A/A run) has no baseline
+    held_eq = markers_only and all((eq.get(n) or {}).get("not_equivalent", 0) == 0 for n in ("A", "B")) and \
+        sum((eq.get(n) or {}).get("equivalent", 0) for n in ("A", "B") if specs[n] == "safe") > 0
+    if held_eq:                       # equivalence says the input was the same, not that the arm ran as well: an arm
+        fl = r.get("failures") or {}  # that failed more, or lost on the interval outright, is judged on the interval
+        safe = [n for n in ("A", "B") if specs[n] == "safe"]
+        other = [n for n in ("A", "B") if n not in safe]
+        worse = any((fl.get(s) or {}).get(k, 0) > (fl.get(o) or {}).get(k, 0)
+                    for s in safe for o in other for k in ("failed_tasks", "failed_calls"))
+        iv = q["interval"] if q is not None else None                  # the interval is B minus A
+        lost = iv is not None and ((specs["B"] == "safe" and iv[1] < 0) or (specs["A"] == "safe" and specs["B"] != "safe" and iv[0] > 0))
+        held_eq = not (worse or lost)
+    if held_eq:                       # levers that change only cache markers: quality rests on equivalence, not on the
+        n = sum((eq.get(x) or {}).get("equivalent", 0) for x in ("A", "B") if specs[x] == "safe")   # pass-rate interval
+        line = (f"quality: unchanged by construction: the model's input was identical apart from cache markers on all {n} "
+                "calls of the safe arm (equivalence)")
+        if q is not None:
+            line += (f"; pass rate, as context, {q['pass_rate']['A']:.1%} -> {q['pass_rate']['B']:.1%} "
+                     f"({q['difference'] * 100:+.1f} points; with the same input, a difference is the model's own variation or a "
+                     "task that failed in its run, listed below)")
+        lines.append(line)
+    elif q is None:
         lines.append("quality not measured: no grader")
     else:
         lines.append(f"quality {'held' if q['held'] else 'NOT held (' + q['verdict'] + ')'}: pass rate {q['pass_rate']['A']:.1%} "

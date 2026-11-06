@@ -72,3 +72,18 @@ def test_nothing_is_written_without_a_yes(setup):
     said = []
     out = feedback.run(bench_dirs=[], eval_dirs=[], out_dir=tmp, form=False, ask=lambda q: "n", say=said.append)
     assert out is None and not list(tmp.glob("recant-feedback-*.zip")) and said[-1] == "Nothing written."
+
+
+def test_two_jobs_levers_are_told_apart_without_their_names():
+    feedback._JOBS.clear()
+    ids = [feedback.lever_id(x) for x in ("effort.researcher", "effort.writer", "reasoning.researcher", "effort.agent")]
+    assert ids == ["effort.<job 1>", "effort.<job 2>", "reasoning.<job 1>", "effort.agent"]
+    assert not any("researcher" in i or "writer" in i for i in ids)
+
+
+def test_what_the_allow_list_left_out_is_said_by_where_never_by_what():
+    dropped: list = []
+    out = feedback.scrub({"header": {"model": "house-model-3", "a customer's name": 1}, "levers": [{"id": "x.y"}]}, dropped=dropped)
+    assert out == {"header": {"model": None}, "levers": [{"id": None}]}
+    assert dropped == ["header.model", "header.<key>", "levers[0].id"]
+    assert "house-model" not in json.dumps(dropped) and "customer" not in json.dumps(dropped)

@@ -196,3 +196,137 @@ def test_a_right_answer_in_the_principals_own_format_is_right():
     assert em.matches("ACC-EXAMPLE1", "ACC-EXAMPLE1") and not em.matches("ACC-EXAMPLE2", "ACC-EXAMPLE1")
     q = {"kind": "recall", "answer": "2027-03-25"}
     assert em.correct(q, "ANSWER: 25/03/2027") and not em.correct(q, "ANSWER: 25/03/2027", strict=True)
+
+
+@pytest.mark.parametrize("question,drafted,key", [
+    ("Which project do I manage?", "Project Juniper", "Juniper"),
+    ("What project do I run, and for which cooperative?", "Project Alder, Brook Cooperative", "Alder, Brook"),
+    ("What is the deadline now?", "the 14 March deadline", "14 March"),
+    ("Who is our accountant?", "Alice Example", "Alice Example"),
+    ("How should prices be quoted to me?", "including German VAT", "including German VAT"),   # not the drafter's to judge:
+    ("What is my name?", "name", "name"),                                                    # kept, listed to check
+    ("What is my New York office address?", "10 New York Avenue", "10 New York Avenue"),     # a word inside is the value's
+])
+def test_a_suggested_key_drops_the_question_s_words_from_its_ends(question, drafted, key):
+    """The suggestion only: the 0.3.2 drafter, told to write minimal keys, still wrote 'Project <name>' (an outside
+    developer trimmed 6 of 26 by hand). It is never applied by itself: see the next test."""
+    assert em.trim_key(question, drafted) == key
+
+
+def test_no_key_is_changed_by_its_suggestion():
+    """'New York Avenue' for 'my New York office address' would be suggested as 'Avenue', which scores 'Boston Avenue'
+    right: so a suggestion is listed, never applied."""
+    assert em.trim_key("What is my New York office address?", "New York Avenue") == "Avenue"
+    q = {"kind": "recall", "answer": "New York Avenue"}
+    assert not em.correct(q, "ANSWER: Boston Avenue")
+
+
+def test_drafting_reports_trimmed_keys_and_lists_long_ones(sess, tmp_path):
+    out = em.make_questions(sess, raw=FakeSDK(), model="claude-sonnet-5-5", out_path=str(tmp_path / "q.jsonl"), root=tmp_path)
+    assert out["keys_with_a_suggestion"] == 0 and out["keys_to_check"] == []
+
+
+def test_a_leading_letter_that_reads_like_an_article_is_kept(tmp_path):
+    """'A minus' is a grade, not an article and a word: the key is kept as drafted. (The words-only check reads only
+    words of two characters or more, so it cannot tell 'A minus' from 'B minus' either: a known limit, in the README.)"""
+    class Grade(FakeSDK):
+        def create(self, *, system, messages, **kw):
+            if system.startswith(em.QUESTION_SYSTEM[:30]):
+                qs = [{"kind": "recall", "question": "What is my grade?", "answer": "A minus", "quote": "My grade is A minus.",
+                       "session": 1}]
+                return msg([t(json.dumps({"questions": qs}))])
+            return super().create(system=system, messages=messages, **kw)
+    p = tmp_path / "s.jsonl"
+    p.write_text(json.dumps({"scope": "user:g", "ts": "2026-01-05T09:00:00+00:00",
+                             "messages": [{"role": "user", "content": "My grade is A minus."}]}) + "\n")
+    em.make_questions(em.load_sessions(str(p)), raw=Grade(), model="claude-sonnet-5-5", out_path=str(tmp_path / "q.jsonl"), root=tmp_path)
+    row, = [json.loads(x) for x in (tmp_path / "q.jsonl").read_text().splitlines()]
+    assert row["answer"] == "A minus"
+
+
+def test_each_arm_is_told_who_is_asking(sess, tmp_path):
+    """Without the asker's name, a memory arm can hold a person's facts and still not know they are the one asking."""
+    assert {s["name"] for s in sess} == {"ana", "bo"}                       # the scope after its colon, by default
+    p = tmp_path / "named.jsonl"
+    p.write_text(json.dumps({"scope": "user:7", "ts": "2026-01-05T09:00:00+00:00", "name": "Ana Example",
+                             "messages": [{"role": "user", "content": "hi"}]}) + "\n")
+    assert em.load_sessions(str(p))[0]["name"] == "Ana Example"
+
+    class Seeing(FakeSDK):
+        def __init__(self):
+            super().__init__()
+            self.systems = []
+
+        def create(self, *, system, messages, **kw):
+            self.systems.append(system)
+            return super().create(system=system, messages=messages, **kw)
+    qp = tmp_path / "q.jsonl"
+    em.make_questions(sess, raw=FakeSDK(), model="claude-sonnet-5-5", out_path=str(qp), root=tmp_path / "e")
+    raw = Seeing()
+    em.evaluate(sess, str(qp), raw=raw, model="claude-sonnet-5-5", out=str(tmp_path / "e"), extract_client=Extractor(),
+                arms=("none", "history"), say=lambda *_: None)
+    answers = [x for x in raw.systems if x.startswith(em.ANSWER_SYSTEM[:30])]
+    assert answers and all("The person asking is ana." in x or "The person asking is bo." in x for x in answers)
+
+
+def test_a_few_scopes_are_said_to_be_too_few_for_the_intervals(sess, tmp_path):
+    qp = tmp_path / "q.jsonl"
+    em.make_questions(sess, raw=FakeSDK(), model="claude-sonnet-5-5", out_path=str(qp), root=tmp_path / "e")
+    rep = em.evaluate(sess, str(qp), raw=FakeSDK(), model="claude-sonnet-5-5", out=str(tmp_path / "e"), extract_client=Extractor(),
+                      arms=("none", "history"), say=lambda *_: None)
+    v = rep["verdict"]
+    assert v[0].startswith("none: ")                                          # still led by the strict score
+    assert any(x.startswith("2 scopes: the intervals resample whole scopes") for x in v)
+    assert any("(words only and value match)" in x for x in v)              # one figure where the two agree
+
+
+def test_an_estimate_runs_the_first_scope_only_and_scales_it(sess, tmp_path):
+    qp = tmp_path / "q.jsonl"
+    em.make_questions(sess, raw=FakeSDK(), model="claude-sonnet-5-5", out_path=str(qp), root=tmp_path / "e")
+    est = em.estimate(sess, str(qp), raw=FakeSDK(), model="claude-sonnet-5-5", out=str(tmp_path / "est"), extract_client=Extractor())
+    assert est["scopes"] == 2 and est["questions"] == 5 and est["questions_run"] < est["questions"]
+    assert est["estimated_usd"] > est["spent_usd"] > 0
+    assert not (tmp_path / "e" / "report.json").exists()                     # the real run did not start
+
+
+def test_a_question_the_person_asked_is_not_a_fact_they_stated():
+    ss = [{"scope": "user:a", "ts": "2026-01-05T09:00:00+00:00", "name": "a",
+           "turns": [{"role": "user", "text": "What were the Q3 2026 sales numbers?"}]}]
+    q = {"kind": "recall", "question": "Which quarter did I ask about?", "answer": "Q3 2026",
+         "quote": "What were the Q3 2026 sales numbers?", "session": 1}
+    assert em.check_question(q, ss) == "the quote is a question the person asked, not a fact they stated"
+
+
+def test_absent_questions_are_held_to_a_third_of_a_scope_s(sess, tmp_path):
+    """An outside developer's drafter wrote 11 absent questions of 26, near-duplicates among them."""
+    class Absentee(FakeSDK):
+        def create(self, *, system, messages, **kw):
+            if system.startswith(em.QUESTION_SYSTEM[:30]):
+                qs = [{"kind": "recall", "question": "Who is our accountant?", "answer": "Alice Example",
+                       "quote": "Our accountant is Alice Example.", "session": 1}] + \
+                     [{"kind": "absent", "question": f"How many people are on my team ({i})?", "answer": "I don't know",
+                       "quote": "", "session": 0} for i in range(5)]
+                return msg([t(json.dumps({"questions": qs}))])
+            return super().create(system=system, messages=messages, **kw)
+    out = em.make_questions([s for s in sess if s["scope"] == "user:ana"], raw=Absentee(), model="claude-sonnet-5-5",
+                            out_path=str(tmp_path / "q.jsonl"), root=tmp_path)
+    assert out["by_kind"]["absent"] == 1 and out["by_kind"]["recall"] == 1        # a third of 2, rounded up (it kept 2 of 5)
+    assert sum("would be absent" in d["reason"] for d in out["dropped"]) == 4
+
+
+def test_drafting_keeps_the_drafter_s_key_and_lists_the_suggestion(tmp_path):
+    class Address(FakeSDK):
+        def create(self, *, system, messages, **kw):
+            if system.startswith(em.QUESTION_SYSTEM[:30]):
+                qs = [{"kind": "recall", "question": "What is my New York office address?", "answer": "New York Avenue",
+                       "quote": "Our New York office is on New York Avenue.", "session": 1}]
+                return msg([t(json.dumps({"questions": qs}))])
+            return super().create(system=system, messages=messages, **kw)
+    p = tmp_path / "s.jsonl"
+    p.write_text(json.dumps({"scope": "user:ny", "ts": "2026-01-05T09:00:00+00:00",
+                             "messages": [{"role": "user", "content": "Our New York office is on New York Avenue."}]}) + "\n")
+    out = em.make_questions(em.load_sessions(str(p)), raw=Address(), model="claude-sonnet-5-5", out_path=str(tmp_path / "q.jsonl"),
+                            root=tmp_path)
+    row, = [json.loads(x) for x in (tmp_path / "q.jsonl").read_text().splitlines()]
+    assert row["answer"] == "New York Avenue" and row["answer_suggested"] == "Avenue"
+    assert out["keys_to_check"] == [{"id": row["id"], "answer": "New York Avenue", "suggested": "Avenue"}]

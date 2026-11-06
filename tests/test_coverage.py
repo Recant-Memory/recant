@@ -280,3 +280,29 @@ def test_reconcile_names_the_unpriced_model_it_leaves_out_of_the_cost_share():
     text = coverage.render_reconcile(r)
     assert "Recant saw 99.8% of the tokens" in text
     assert "unpriced, so left out of the cost share: gpt-4o-mini (445 tokens, 0% seen)" in text
+
+
+def test_a_usage_file_in_the_sdk_s_names_with_a_local_offset_reads_as_recant_s_utc_day(tmp_path):
+    """An outside developer's export: the SDK's field names and a +01:00 time just after local midnight, which is the
+    day before in UTC. In 0.3.2 the first read 'no tokens reported' and, renamed, the second read 'Recant saw 0%'."""
+    p = tmp_path / "usage.jsonl"
+    p.write_text(json.dumps({"ts": "2026-11-06T00:49:27+0100", "model": "claude-sonnet-5-5", "input_tokens": 1000,
+                             "output_tokens": 50, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}) + "\n")
+    rows = coverage.read_usage(p)
+    assert rows[0]["ts"].startswith("2026-11-05T23:49:27") and rows[0]["tokens_in"] == 1000
+    r = coverage.reconcile(rows, [metered("2026-11-05", "claude-sonnet-5-5", 1000, 50, 0, 0)])
+    assert "Recant saw 100% of the tokens" in coverage.render_reconcile(r)
+
+
+def test_a_usage_file_with_no_token_count_is_refused(tmp_path):
+    p = tmp_path / "usage.jsonl"
+    p.write_text(json.dumps({"ts": "2026-11-05T10:00:00Z", "model": "m", "prompt": 3}) + "\n")
+    with pytest.raises(ValueError, match="no line has a token count"):
+        coverage.read_usage(p)
+
+
+def test_an_empty_usage_file_is_refused_too(tmp_path):
+    p = tmp_path / "usage.jsonl"
+    p.write_text("\n  \n")
+    with pytest.raises(ValueError, match="no line has a token count"):
+        coverage.read_usage(p)
