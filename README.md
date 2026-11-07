@@ -58,7 +58,8 @@ one of them alone:
    not: requests that could be read from the cache, cache lifetimes, output caps, effort, tool output, loops. It
    prices each lever in dollars on your own traffic and applies the safe ones on `recant apply` — those that change
    only cache markers, never what the model sees — then checks each one's realized saving against its prediction and
-   reverts one that does not deliver. Everything else is reported with its price and left to you.
+   reverts one that loses money or trips its guard (one that saves less than predicted stays on, its check saying so).
+   Everything else is reported with its price and left to you.
 2. **Managed memory.** By default, notes: the agent writes keyed, dated facts with one tool; Recant checks each
    against the conversation it came from, keeps the history, and renders the notes into the cached prefix. The
    fallback, for a scope that outgrows notes, is extracted memory: a store with a review lifecycle, a task ledger,
@@ -80,7 +81,7 @@ pip install "recant[anthropic]"
 Or from GitHub, pinned to a tag:
 
 ```
-pip install "recant[anthropic] @ git+https://github.com/recant-memory/recant@v0.4.1"
+pip install "recant[anthropic] @ git+https://github.com/recant-memory/recant@v0.4.2"
 ```
 
 `recant --version` prints the version and the commit it was built from: `release build` from PyPI (0.3.3 on),
@@ -126,11 +127,14 @@ with client.run("agent", session="chat-1"):            # optional: name the agen
 - **Settings.** A lever is priced from its job's last change of settings: the model, effort, output cap, tools, or the
   system prompt's fixed part. Prompts that share at least the model's cacheable minimum from the start are one fixed
   part, judged by what they all share, so a per-request name or brief after a fixed opening is content, not a change;
-  a prompt that opens two or more requests is a fixed prompt, so replacing it, or adding to or cutting it where every
-  prompt of the job is fixed, is a change. A job whose prompts share no cacheable start and each open one request
-  only (a per-request part at the top) is named in the report: no conversation can reuse another's prompt, and
-  moving that part below the fixed instructions is a saving the report sizes, across conversations, when all of them
-  share an ending long enough to cache.
+  a prompt that opens in two or more conversations is a fixed prompt, so replacing it, or adding to or cutting it
+  where every prompt of the job is fixed, is a change. A prompt that opens in one conversation only and shares no
+  cacheable start with another is content, and never a change. The report says where the rule cannot see: a job whose
+  prompts are read as content, and a job whose prompts carry a per-request part after a fixed part (a change at the
+  end of that fixed part may not be detected); for both, the realized-against-predicted check is the guard. A job
+  whose per-request part comes first is also named: no conversation can reuse another's prompt, and moving that part
+  below the fixed instructions is a saving the report sizes, across conversations, when all of them share an ending
+  long enough to cache.
 - **Checking the pass-through yourself.** Hash each request body as the SDK sends it, run once with `recant off` and
   once with `recant on` before `recant apply`: the digests match, and match the unwrapped client's. After `recant
   apply` the only difference is `cache_control` fields.
@@ -151,13 +155,14 @@ Then, after a few dozen calls:
 recant cost                      # spent, can save, measured on; the bill split; the levers, each priced in dollars
 recant apply --dry-run           # what each safe lever would change in a request
 recant apply                     # turn them on
-recant cost --nightly            # schedule it: apply what newly pays, check what was applied, revert what did not deliver
+recant cost --nightly            # schedule it: apply what newly pays, check what was applied, revert what loses money
 ```
 
 Schedule the last line nightly. An applied lever is carried out on the wrapper's next `create`; the request it sends
 differs from yours only in cache markers, and each call is checked for that (a request that would differ in anything
 else is sent as you built it). After 50 runs or seven days the nightly pass prices the same calls both ways and
-records the lever's realized saving against its prediction; one that does not deliver is reverted. `recant cost
+records the lever's realized saving against its prediction (plain `recant cost` shows the same check, unrecorded);
+one that loses money or trips its guard is reverted, and one that saves less than predicted stays on. `recant cost
 --revert breakpoint.add` reverts one by hand; `--all` lists levers that save nothing in the window.
 `examples/cost_quickstart.py` is this, runnable: a support agent with no caching set up, and the command sequence.
 

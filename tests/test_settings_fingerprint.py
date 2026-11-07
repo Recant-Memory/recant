@@ -51,7 +51,8 @@ def test_a_template_at_the_top_is_said_in_one_line_and_sized(layout):
     assert st["start"] == 0 and len(st["content"]) == 72                    # every prompt is content from the top
     assert _changes(rep) == []                                              # no stable start: nothing to change
     lv = next(lv for lv in cs.advise(rep) if lv.id == "fix.system_order.writer")
-    assert "differ from their first ~0 tokens on, under claude-haiku-5-5's 512-token cache minimum" in lv.note
+    assert "share nothing from the start, under claude-haiku-5-5's 512-token cache minimum" in lv.note
+    assert "not counted as setting changes: the realized-against-predicted check is the guard" in lv.note
     assert "put the per-request part after the fixed instructions" in lv.note
     assert lv.evidence["shared_end_tokens"] >= (len(FIXED) - 256) / 4
     assert lv.saves_usd and lv.saves_usd > 0 and "would have saved about $" in lv.note
@@ -360,7 +361,9 @@ def test_a_conversation_that_switches_its_system_prompt_opens_the_new_one(layout
     st = cs.stable_starts(rep.calls)["writer"]
     later = sorted(rep.calls, key=lambda c: c["start"])[2:]
     assert all(st["heads"][id(c)][0] >= 4096 for c in later)                # A and B are fixed prompts
-    assert len(_changes(rep)) == 1                                          # A to B
+    starts = [c["start"] for c in later]
+    assert [ch["at"] for ch in _changes(rep)] == [starts[0], starts[2]]     # content to A (0.4.2: a kind after content),
+                                                                            # then A to B
 
 
 def test_a_rejected_batch_leaves_the_conversation_history_as_it_was(machinery, log):
@@ -378,9 +381,10 @@ def test_a_rejected_batch_leaves_the_conversation_history_as_it_was(machinery, l
 
 
 
-def test_dropping_the_system_prompt_between_uses_counts_each_return_as_an_opening(layout):
-    """One conversation, its history growing: A, none, A, B, none, B. A and B each open twice, so both are fixed
-    prompts, and A to B is a change."""
+def test_prompts_that_open_in_one_conversation_only_are_content_whatever_they_do_in_it(layout):
+    """0.4.2: one conversation, its history growing: A, none, A, B, none, B. A and B each open in that one conversation
+    only, so both are content, and A to B is not counted (before 0.4.2, each return was an opening and A to B a
+    change). Dropping the system prompt is still a change of its own."""
     client = wrap(FakeSDK(), store=layout, tenant=TENANT, job="agent")
     hist = []
     with client.run("writer", session="c"):
@@ -394,7 +398,159 @@ def test_dropping_the_system_prompt_between_uses_counts_each_return_as_an_openin
     rep = cs.report(layout, TENANT, cs.HostShape(**{k: (tuple(v) if isinstance(v, list) else v) for k, v in host.items()}),
                     since="30d")
     st = cs.stable_starts(rep.calls)["writer"]
-    with_system = [c for c in rep.calls if c.get("sys_prefix")]
-    assert len(with_system) == 4 and all(st["heads"][id(c)][0] == 4096 for c in with_system)
-    b_first = sorted(with_system, key=lambda c: c["start"])[2]["start"]
-    assert any(ch["at"] == b_first for ch in _changes(rep))                 # A to B, at B's first call
+    with_system = sorted((c for c in rep.calls if c.get("sys_prefix")), key=lambda c: c["start"])
+    assert len(with_system) == 4 and all(st["heads"][id(c)][0] == 0 for c in with_system)   # content, all four
+    none_first = sorted((c for c in rep.calls if not c.get("sys_prefix")), key=lambda c: c["start"])[0]["start"]
+    assert [ch["at"] for ch in _changes(rep)] == [none_first]                # the prompt dropped; not A to B
+
+
+
+# ---------------------------------------------------------------- 0.4.2
+def test_a_short_fixed_part_then_a_per_request_line_gives_no_false_changes(layout):
+    """047's real-run limit: a fixed part under the cacheable minimum, then a per-request line, each conversation's
+    prompt sent on several tasks. Each prompt opens in one conversation only: content, and no change at a new
+    conversation (0.4.1 gave one at each)."""
+    short = "You are the research agent; search, read, then list your findings with their sources. " * 3
+    rows = []
+    for conv in range(6):
+        for task in range(3):                                               # three tasks a conversation, fresh requests
+            rows.append((f"conv{conv}", short + f"\nThis request: user U{conv}, conversation conv{conv}.", H, 50))
+    rep = _calls2(layout, rows)
+    st = cs.stable_starts(rep.calls)["writer"]
+    assert all(st["heads"][id(c)][0] == 0 for c in rep.calls)              # content, every one
+    assert _changes(rep) == []
+    notes = cs.setting_notes(rep)                                           # whole prompts under the minimum: no
+    assert len(notes) == 1 and "are read as content: a change to them is not counted" in notes[0]   # reorder line,
+    assert not any(lv.id.startswith("fix.system_order") for lv in cs.advise(rep))                    # but the note
+
+
+def test_a_short_fixed_part_under_a_long_prompt_is_named_with_its_advice(layout):
+    rows = [(f"conv{c}", "Fixed rules. " * 20 + f"User U{c}, conversation conv{c}. " + "Policy text. " * 400, H, 50)
+            for c in range(4) for _ in range(2)]
+    lv = next(lv for lv in cs.advise(_calls2(layout, rows)) if lv.id == "fix.system_order.writer")
+    assert "share only their first ~" in lv.note and "if more fixed instructions follow the per-request part" in lv.note
+
+
+def test_a_templated_family_is_named_in_the_report_with_its_guard(layout, capsys):
+    from recant import cli
+    rep = _run(layout, lambda i: FIXED + f"\nThe user is {NAMES[i % 3]}; their brief: task {i}.")
+    notes = cs.setting_notes(rep)
+    assert len(notes) == 1 and notes[0].startswith("job writer's system prompts carry a per-request part after a fixed part")
+    assert "the realized-against-predicted check (shown by recant cost after 50 runs or 7 days) is the guard" in notes[0]
+    assert "note: job writer's system prompts carry" in rep.text(cs.advise(rep), [])
+    assert cli.main(["cost", "--json", "--store", str(layout.root), "--tenant", TENANT]) == 0
+    assert json.loads(capsys.readouterr().out)["notes"] == notes
+
+
+def test_no_note_for_a_job_of_fixed_prompts_only(layout):
+    assert cs.setting_notes(_run(layout, lambda i: FIXED)) == []
+
+
+
+# ---------------------------------------------------------------- the cases a review of 0.4.2 found (each failed before)
+def test_a_sessionless_conversation_is_one_conversation_from_its_opening_on(layout):
+    """Two explicit runs with no session, each one conversation (A, temporary A, A with a growing history): A and B
+    each open in one conversation, so neither is a fixed prompt, and B is no change."""
+    client = wrap(FakeSDK(), store=layout, tenant=TENANT, job="agent")
+    for name in ("A", "B"):
+        hist = []
+        with client.run("writer"):
+            for k, system in enumerate([f"Rules. user {name}", f"Rules. user {name}, for now", f"Rules. user {name}"]):
+                time.sleep(0.002)
+                hist.append({"role": "user", "content": f"turn {k}"})
+                client.messages.create(model=H, max_tokens=50, system=system, messages=list(hist))
+                hist.append({"role": "assistant", "content": "ok"})
+    host = json.loads((layout.costshape_dir(TENANT) / "host.json").read_text())
+    rep = cs.report(layout, TENANT, cs.HostShape(**{k: (tuple(v) if isinstance(v, list) else v) for k, v in host.items()}),
+                    since="30d")
+    assert _changes(rep) == []
+
+
+def test_two_wrappers_never_share_a_made_up_conversation(tmp_path):
+    from recant.metering import Meter
+    from recant.store import StoreLayout
+    a, b = (Meter(StoreLayout(tmp_path / "s"), TENANT, threads=True) for _ in range(2))
+    msgs = [{"role": "user", "content": "hi"}]
+    sa = a.record(job="agent", model=H, usage={"input": 1, "output": 1}, messages=msgs)["session"]
+    sb = b.record(job="agent", model=H, usage={"input": 1, "output": 1}, messages=msgs)["session"]
+    assert sa != sb and sa.startswith("auto:") and sb.startswith("auto:")
+
+
+def test_a_made_up_conversation_id_is_read_within_its_run_even_from_older_logs(layout):
+    rows = [(s, p, H, 50) for s, p in _fixed("A" * 4096, "B" * 4096)]
+    rep = _calls2(layout, rows)
+    for c in rep.calls:
+        c["session"] = "auto:deadbeef-1"                                    # 0.4.1's ids could repeat across wrappers
+    assert len(cs._fingerprint_changes(rep.calls)) == 1                    # each run its own conversation: A to B
+
+
+def test_the_upgrade_seed_counts_a_content_prompt_as_a_kind(layout):
+    rows = [("s0", "0" + "F" * 4096, H, 50), ("s1", "1" + "F" * 4096, H, 50), ("s2", None, H, 50)]
+    rep = _calls2(layout, rows)
+    first = min(rep.calls, key=lambda c: c["start"])
+    for k in ("setting_rest", "sys_prefix", "sys_suffix"):
+        first[k] = None                                                     # the first call as 0.4.0 logged it
+    assert len(cs._fingerprint_changes(rep.calls)) == 1                    # content, then no system prompt: a change
+
+
+def test_the_content_note_speaks_of_the_latest_prompts(layout):
+    rows = [("s0", "A" * 4096, H, 50), ("s1", "A" * 4096, H, 50), ("s2", "z" + "F" * 4096, H, 50)]
+    notes = cs.setting_notes(_calls2(layout, rows))
+    assert notes and notes[0].startswith("job writer's latest system prompts each open in one conversation only")
+
+
+def test_recant_cost_shows_an_applied_levers_check_once_its_window_is_complete(layout, capsys, monkeypatch):
+    """Without the nightly pass, plain recant cost checks an applied lever as of now, and records nothing."""
+    from recant import cli
+    import recant.costshape as mod
+    rep = _run(layout, lambda i: FIXED)
+    lv = next(lv for lv in cs.advise(rep) if lv.id == "breakpoint.add")
+    cs.apply(layout, TENANT, rep, lv, min_runs=1)
+    _run(layout, lambda i: FIXED, runs=6)
+    monkeypatch.setattr(mod, "CHECK_RUNS", 5)
+    assert cli.main(["cost", "--store", str(layout.root), "--tenant", TENANT]) == 0
+    out = capsys.readouterr().out
+    assert "breakpoint.add" in out and "checked now, not recorded: `recant cost --nightly` records it" in out
+    assert "reverts a safe lever whose guard trips or that loses money" in out
+    assert not [e for e in cs.ledger(layout, TENANT) if e.get("event") == "checked"]   # nothing written
+    assert cli.main(["cost", "--json", "--store", str(layout.root), "--tenant", TENANT]) == 0
+    checks = json.loads(capsys.readouterr().out)["checks"]
+    assert [c["id"] for c in checks] == ["breakpoint.add"] and checks[0]["live"] is True
+
+
+
+def test_the_finding_counts_each_conversations_first_use_of_its_prompt_once(layout):
+    """Two conversations, three fresh requests each, each conversation its own content prompt: two openings, not six
+    (the later requests of a conversation can already read its prompt)."""
+    rows = [("A", "a" + "F" * 4096, H, 50)] * 3 + [("B", "b" + "F" * 4096, H, 50)] * 3
+    lv = next(lv for lv in cs.advise(_calls2(layout, rows)) if lv.id == "fix.system_order.writer")
+    assert "over these 2 conversations" in lv.note and lv.evidence["conversations"] == 2
+
+
+def test_one_prompt_sent_again_and_again_in_one_conversation_gets_no_reorder_line(layout):
+    rows = [("A", "x" * 4097, H, 50)] * 4
+    assert not any(lv.id.startswith("fix.system_order") for lv in cs.advise(_calls2(layout, rows)))
+
+
+
+def test_a_conversations_later_request_keeps_the_entry_warm_for_the_next_conversation(layout):
+    """Session A at 0 s and 290 s, session B at 400 s, a five-minute lifetime: A's second request keeps the shared part
+    warm, so B's opening reads it (R036's case; before, B was priced cold and the line had no saving)."""
+    rep = _calls2(layout, [("A", "a" + "F" * 4096, H, 50), ("A", "a" + "F" * 4096, H, 50), ("B", "b" + "F" * 4096, H, 50)])
+    t0 = min(c["start"] for c in rep.calls)
+    for c, at in zip(sorted(rep.calls, key=lambda c: c["start"]), (0, 290, 400)):
+        c["start"] = t0 + at
+    lv = next(lv for lv in cs.advise(rep) if lv.id == "fix.system_order.writer")
+    assert lv.saves_usd and lv.saves_usd > 0 and lv.evidence["conversations"] == 2
+
+
+
+def test_a_conversation_opening_while_another_is_still_writing_reads_nothing(layout):
+    """A at 0 s and B at 1 s, each taking 20 s: B starts before A's write is done, so both would write; no saving
+    (R037's case; before, B was priced as a read)."""
+    rep = _calls2(layout, [("A", "a" + "F" * 4096, H, 50), ("B", "b" + "F" * 4096, H, 50)])
+    t0 = min(c["start"] for c in rep.calls)
+    for c, at in zip(sorted(rep.calls, key=lambda c: c["start"]), (0, 1)):
+        c["start"], c["latency"] = t0 + at, 20.0
+    lv = next(lv for lv in cs.advise(rep) if lv.id == "fix.system_order.writer")
+    assert lv.saves_usd is None

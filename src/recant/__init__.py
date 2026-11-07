@@ -11,7 +11,7 @@ Public API: `Store`, `Ledger`, `episodes`, `extract`, `harness`, `budget.fit`, `
 private and may move.
 """
 
-__version__ = "0.4.1"
+__version__ = "0.4.2"
 
 from .provider.interface import ModelClient  # noqa: E402
 from .store import MemoryStore as Store, TaskStore as Ledger, StoreLayout  # noqa: E402

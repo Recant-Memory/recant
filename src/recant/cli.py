@@ -71,10 +71,13 @@ def run_cost(layout, tenant, host, *, prices=None, since="7d", until=None, as_js
     if as_json:
         ready = {lv.id for lv in levers if cs.eligible(rep, lv, ledger_=cs.ledger(layout, tenant))[0]}
         return json.dumps({"summary": cs.lead(rep, levers, ready), "shape": rep.shape, "levers": [vars(lv) for lv in levers], "overlay": cs.overlay(layout, tenant),
-                           "coverage": rep.coverage(),
+                           "coverage": rep.coverage(), "notes": cs.setting_notes(rep),
+                           "checks": cs.live_checks(layout, tenant, host, rep, prices=prices),   # each applied lever's
+                                                                                                 # check now, unrecorded
                            "billing": "reconciled" if bill is not None else "not visible"}, indent=1, default=str)
     from .billing import NOT_VISIBLE
-    return rep.text(levers, cs.ledger(layout, tenant)) + ("" if bill is not None else f"\n{NOT_VISIBLE}")
+    led = cs.ledger(layout, tenant) + cs.live_checks(layout, tenant, host, rep, prices=prices)   # checked now, unrecorded
+    return rep.text(levers, led) + ("" if bill is not None else f"\n{NOT_VISIBLE}")
 
 
 def run_coverage(usage_path, store=None, tenant=None, *, prices=None, as_json=False) -> str:

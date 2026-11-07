@@ -157,6 +157,7 @@ class Meter:
         self._last: dict = {}
         self._threads = threads
         self._seen: dict = {}                   # the hash of a request's messages -> the conversation it belongs to
+        self._ns = __import__("os").urandom(3).hex()   # this meter's own: two wrappers' conversations never share an id
         self._tip: dict = {}                    # a conversation -> the hash of its latest request
         self._n = 0
         self._lock = threading.Lock()          # a host's threads may share a meter: the log is opened once
@@ -224,7 +225,7 @@ class Meter:
             extends = conv is not None and self._tip.get(conv) == hit   # it continues that conversation's latest request
             if not extends:                                  # new, or a branch off an earlier point of one: its own
                 self._n += 1                                 # conversation, which reuses nothing it cannot be sure of
-                conv = f"auto:{cum[0][:8]}-{self._n}"
+                conv = f"auto:{self._ns}-{cum[0][:8]}-{self._n}"
             self._seen[cum[-1]] = conv
             self._tip[conv] = cum[-1]
             for d in (self._seen, self._tip):                # bounded: the oldest go first

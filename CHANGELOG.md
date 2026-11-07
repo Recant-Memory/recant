@@ -4,6 +4,37 @@ What changed in each version, and the measurements behind the numbers the README
 comments use. Each measurement says what it was run on; none of it is a promise about your traffic. Measure your own
 with `recant bench` and `recant eval memory`.
 
+## 0.4.2
+
+From the first check of 0.4.1's rule on real calls: a stranger's two-agent app, 30 tasks, its researcher's system
+prompt a fixed part and a per-request line, one instruction changed after task 15. On those calls 0.4.1 found the one
+change and no other, and priced `breakpoint.add` on the calls since it (realized $0.1089 against $0.1176 predicted,
+93%). Replaying the rule on the same calls for two other kinds of prompt found two limits:
+
+- **A short templated prompt no longer gives false changes, where each conversation carries one id.** With a fixed
+  part under the model's cacheable minimum, then a per-request line, each conversation's prompt was sent on several
+  of its tasks, counted as a fixed prompt of its own, and made every new conversation a setting change (8 in the
+  replay). A prompt now counts as fixed only when it opens in two or more conversations: a conversation is the
+  session the host gives (one `recant.wrap` makes up is read within its run); with none given, a fresh request and
+  the later turns that extend it. A prompt that opens in one conversation only and shares no cacheable start is
+  content, never a change by itself. The replay now gives none. In exchange, a change to such prompts is not counted
+  either, and one conversation that switches between two prompts no longer counts the switch. A per-request
+  expansion sent in two conversations (the same user's line in a session and again with none) is still taken for a
+  fixed prompt.
+- **The report says where the rule cannot see.** A job whose latest prompts are content, and a job whose prompts are a
+  template (a fixed part, then a per-request part), where an instruction added at the end of the fixed part looks like
+  more of the per-request part (the replay: not detected), each get a line under the levers (`note:`; `notes` in
+  `recant cost --json`): a change there may not be detected, so a lever may be priced on calls from before it, and the
+  realized-against-predicted check is the guard.
+- The `fix.system_order` line tells a per-request part at the top from a fixed part too short to cache.
+- **`recant cost` shows an applied lever's check** once its window is complete (50 runs or 7 days), as the README's
+  first screen says it does. Before, only `recant cost --nightly` checked a lever, and plain `recant cost` said "no
+  applied lever has been checked yet" however long it had run. The check is the nightly pass's own, computed now and
+  marked as not recorded (in `--json`, `checks`); the nightly pass still records it, and reverts a safe lever whose
+  guard trips or that loses money (a lever that saves less than predicted stays on, its check saying so).
+- `recant.wrap`'s made-up conversation ids (for calls outside any `client.run`) are unique to each wrapper; two
+  processes could repeat one before.
+
 ## 0.4.1
 
 - **A setting change is judged on the system prompt's fixed part.** Before, a job sending a system prompt it had

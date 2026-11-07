@@ -529,7 +529,7 @@ def render(s: dict, title: str = "host") -> str:
 
 # ======================================================================= the advisor
 # One loop over Recant's own log: measure, diagnose, advise, apply the safe levers, check each against its
-# prediction, revert what does not deliver. Three kinds of advice:
+# prediction, revert what loses money or trips a guard. Three kinds of advice:
 #   applied    — on the safe line, input unchanged (cache lifetime, breakpoints, batching background work, folding only when it pays):
 #                Recant applies them itself, through one overlay, and checks them;
 #   your_call  — they change what the model sees or what memory stores (budgets, reasoning, a hand-off): off until the
@@ -740,13 +740,17 @@ class Report:
                     f"scaled from that shorter span, a span under a day counted as a day):") if rest else
                    "levers: none sized in this window")
         out += items(sorted(rest, key=lambda lv: ({"automatic": 0, "opt-in": 1}.get(label_of(lv), 2), -(lv.saves_usd or 0))))
+        out += [f"note: {n}" for n in setting_notes(self)]
         checks = [e for e in (ledger or []) if e.get("event") == "checked"]
         if checks:
             last: dict = {}
             for e in checks:
                 last[e["id"]] = e
             out.append("predicted against realized (each lever's latest check, per affected call; the same calls priced both ways):")
-            out += ["  " + delivered_line(e) for e in last.values()]
+            out += ["  " + delivered_line(e) + (" (checked now, not recorded: `recant cost --nightly` records it, and "
+                                                 "reverts a safe lever whose guard trips or that loses money)"
+                                                 if e.get("live") else "")
+                    for e in last.values()]
             acc = accuracy(ledger)
             if acc:
                 out.append("  advisor accuracy (realized / predicted): " + ", ".join(f"{k} {v:.0%}" for k, v in acc.items()))
@@ -1097,6 +1101,25 @@ def _lcp(members: list) -> int:
     return min([_common(first, m["sys_prefix"]) for m in members[1:]] or [first[-1][0]])
 
 
+def _conversations(calls: list) -> dict:
+    """The conversation each call belongs to (by id), for counting where a prompt opens. A session the host gave is
+    one, namespaced by its run when recant.wrap made it up (auto:, one per wrapper, which may repeat in another); with
+    no session given (it is then the run's id), each fresh request starts a conversation and its later turns, which
+    extend it, belong to the same one."""
+    out, chain = {}, {}
+    for c in sorted(calls, key=lambda c: c["start"]):
+        run = c["run"].split(":")[0]
+        s = c.get("session")
+        if s and s != run:
+            out[id(c)] = (run, s) if str(s).startswith("auto:") else s
+            continue
+        key = (c["job"], run)
+        if not c.get("extends_previous") or key not in chain:
+            chain[key] = ("request", run, c["seq"], c["start"])
+        out[id(c)] = chain[key]
+    return out
+
+
 def stable_starts(calls: list) -> dict[str, dict]:
     """Per job: which part of each system prompt is a setting, judged the way the cache reads it (0.4.1). The cache
     keeps a prefix per model, at least the model's minimum long, so prompts are compared per (job, model): two distinct
@@ -1105,9 +1128,10 @@ def stable_starts(calls: list) -> dict[str, dict]:
 
     - in a family: what the whole family shares from the start (a per-request name or brief after a fixed opening
       stays out of it);
-    - a prompt of its own that opens two or more requests (sent fresh, not as the next turn of a conversation): all of
-      it (a fixed prompt);
-    - a prompt of its own that opens one request only: nothing (content: a per-request part at the top, or a one-off).
+    - a prompt of its own that opens in two or more conversations (sent fresh, or switched to, in each): all of it (a
+      fixed prompt);
+    - a prompt of its own that opens in one conversation only: nothing (content: a per-request part, at the top or
+      after a fixed part too short to cache, or a one-off), never a change by itself (0.4.2).
 
     In a family whose prompts each open two or more requests (no per-request member), each whole prompt is also a
     variant, and a new variant is a change: instructions added to or cut from a fixed prompt. A family with a
@@ -1116,9 +1140,10 @@ def stable_starts(calls: list) -> dict[str, dict]:
     calls whose prompt is content only. Jobs whose calls carry no hashes are left out."""
     by: dict = {}
     old_opens: dict = {}                                     # calls logged before 0.4.1: their openings, by whole fingerprint
+    convs = _conversations(calls)
     first_use, last_in = set(), {}                          # a call that opens its prompt: a fresh request, or one whose
     for c in sorted(calls, key=lambda c: c["start"]):       # conversation switched to this prompt (from another, or from
-        conv = (c["job"], c.get("session") or c["run"])     # none): a growing history does not mean the system prompt
+        conv = (c["job"], convs[id(c)])                     # none): a growing history does not mean the system prompt
         key = c["sys_prefix"][-1][1] if c.get("sys_prefix") else None   # stayed the same
         if not c.get("extends_previous") or last_in.get(conv, "unset") != key:
             first_use.add(id(c))
@@ -1127,7 +1152,7 @@ def stable_starts(calls: list) -> dict[str, dict]:
         if c.get("sys_prefix") and c.get("setting_rest"):
             by.setdefault((c["job"], c["model"]), []).append(c)
         elif c.get("setting_fp") and not c.get("extends_previous"):
-            old_opens[(c["job"], c["setting_fp"])] = old_opens.get((c["job"], c["setting_fp"]), 0) + 1
+            old_opens.setdefault((c["job"], c["setting_fp"]), set()).add(convs[id(c)])
     out: dict = {}
     for (job, model), cs in by.items():
         floor = cache_min(model) * CHARS_PER_TOKEN
@@ -1135,9 +1160,9 @@ def stable_starts(calls: list) -> dict[str, dict]:
         prompts: dict = {}                                    # a prompt's full hash -> its calls, in order
         for c in cs:
             prompts.setdefault(c["sys_prefix"][-1][1], []).append(c)
-        opens = {k: sum(1 for c in pcs if id(c) in first_use)
-                    + sum(old_opens.get((job, fp), 0) for fp in {c.get("setting_fp") for c in pcs})   # the same prompt, logged
-                 for k, pcs in prompts.items()}                                                      # before 0.4.1 too
+        opens = {k: len({convs[id(c)] for c in pcs if id(c) in first_use}                # the conversations it opens in,
+                        | set().union(*[old_opens.get((job, fp), set()) for fp in {c.get("setting_fp") for c in pcs}]))
+                 for k, pcs in prompts.items()}                                            # its calls before 0.4.1 too
         family: dict = {}                                     # the hash at the minimum -> the prompts that share it
         for key, pcs in prompts.items():
             h = dict((k, v) for k, v in pcs[0]["sys_prefix"]).get(at_floor)
@@ -1146,8 +1171,13 @@ def stable_starts(calls: list) -> dict[str, dict]:
         fam_of = {k: f for f, ks in family.items() for k in ks if len(ks) >= 2}
         fam_head = {f: _lcp([prompts[k][0] for k in ks]) for f, ks in family.items() if len(ks) >= 2}
         fixed_family = {f for f, ks in family.items() if len(ks) >= 2 and all(opens[k] >= 2 for k in ks)}
-        st = out.setdefault(job, {"heads": {}, "content": [], "calls": 0, "prompts": 0, "floor_chars": {}, "opening": set()})
+        templated = any(len(ks) >= 2 and f not in fixed_family for f, ks in family.items())   # a family with a
+                                                                                               # per-request member
+        st = out.setdefault(job, {"heads": {}, "content": [], "calls": 0, "prompts": 0, "floor_chars": {}, "opening": set(),
+                                  "templated": False})
+        st["templated"] = st["templated"] or templated
         st["opening"] |= {id(c) for c in cs if id(c) in first_use}
+        st.setdefault("conv", {}).update({id(c): convs[id(c)] for c in cs})
         for key, pcs in prompts.items():
             pre = dict((k, v) for k, v in pcs[0]["sys_prefix"])
             full = pcs[0]["sys_prefix"][-1][0]
@@ -1208,8 +1238,7 @@ def _fingerprint_changes(calls: list) -> list[dict]:
         variant = st["heads"].get(id(c), (0, "", ""))[2] if st else ""
         if fmt and new_format.get(job) is False:          # the first call logged with 0.4.1's hashes, after calls
             rests.setdefault(job, set()).add(c["setting_rest"])   # without: a new way of keying, not a new setting
-            if head != "content":
-                heads.setdefault(job, set()).add(head)
+            heads.setdefault(job, set()).add(head)        # content too: a kind, as below
             if variant:
                 variants.setdefault((job, head), set()).add(variant)
             new_format[job] = True
@@ -1225,8 +1254,10 @@ def _fingerprint_changes(calls: list) -> list[dict]:
         rs = rests.setdefault(job, set())                 # prompt's fixed part, its fixed variant
         changed = bool(rs) and c["setting_rest"] not in rs
         rs.add(c["setting_rest"])
-        if head != "content":                             # a prompt that is content only is never a change by itself
-            hs = heads.setdefault(job, set())
+        hs = heads.setdefault(job, set())
+        if head == "content":                             # a prompt that is content only is never a change by itself,
+            hs.add(head)                                  # but a different kind after it (none, a fixed part) is
+        else:
             changed = changed or (bool(hs) and head not in hs)
             hs.add(head)
             if variant:
@@ -1695,14 +1726,36 @@ def detect_output_cap(rep: Report) -> list[Lever]:
 CHARS_PER_TOKEN = 4.0                    # a stable start is measured in characters; its tokens are estimated at this
 
 
+def setting_notes(rep: Report) -> list[str]:
+    """What the setting-change rule cannot see on this traffic, said where it applies (0.4.2): a job whose latest
+    prompts are content (each opens in one conversation, and they share no cacheable start) has no change counted for
+    them; a job whose system prompts are a template (a fixed part, then a per-request part) is judged by the fixed part
+    all its prompts share, so an instruction added at the end of that part looks like more of the per-request part."""
+    out = []
+    for job, st in sorted(stable_starts(rep.calls).items()):
+        latest = st["latest"]
+        if latest.get("sys_prefix") and not st["heads"].get(id(latest), (1,))[0]:
+            out.append(f"job {job}'s latest system prompts each open in one conversation only and share no cacheable "
+                       "start, so they are read as content: a change to them is not counted as a setting change, so its "
+                       "levers may be priced on calls from before it; the realized-against-predicted check (shown by "
+                       "recant cost after 50 runs or 7 days) is the guard")
+        if st.get("templated"):
+            out.append(f"job {job}'s system prompts carry a per-request part after a fixed part: a change at the end of "
+                       "that fixed part may not be detected as a setting change, so its levers may be priced on calls from "
+                       "before it; the realized-against-predicted check (shown by recant cost after 50 runs or 7 days) is "
+                       "the guard")
+    return out
+
+
 def detect_system_order(rep: Report) -> list[Lever]:
-    """A job whose system prompts are content from the start (a per-request name or brief at the top, so no two share
-    the model's cacheable minimum, and none opens another request): no conversation can reuse another's prompt from
-    the cache (within one, its later turns resend the same prompt and can). One line per job, while its latest call
-    is such a prompt. When all of those prompts share an ending long enough to cache, it is sized as if put first, over
-    the conversations' opening calls only: each reads it at the cache-read rate when the opening before it, on the same
-    model and settings, is within the cache's lifetime, and writes it (that lifetime's premium) when not; each priced
-    on its own whole prompt's card, at the batch rate when batched."""
+    """A job whose latest system prompts are content (each opens in one conversation only, and no two share the
+    model's cacheable minimum from the start): no conversation can reuse another's prompt from the cache (within one,
+    its later requests resend the same prompt and can). One line per job, while its latest call is such a prompt and
+    there are two or more of them. When all of those prompts share an ending long enough to cache, it is sized as if
+    put first, over each conversation's first use of its prompt: a read at the cache-read rate when an entry on the
+    same model and settings is ready (its writing request has finished) and within the cache's lifetime of its last
+    use (every request, priced or not, refreshes it), that lifetime's write premium when not; each priced on its own
+    whole prompt's card, at the batch rate when batched."""
     out = []
     starts = stable_starts(rep.calls)
     ttl = TTL_SECONDS.get(rep.host.prefix_ttl, TTL_SECONDS["5m"])
@@ -1711,13 +1764,19 @@ def detect_system_order(rep: Report) -> list[Lever]:
         if not latest.get("sys_prefix") or st["heads"].get(id(latest), (1,))[0]:
             continue
         cs = sorted((c for c in st["content"] if c["model"] == latest["model"]), key=lambda c: c["start"])
-        opening = [c for c in cs if id(c) in st["opening"]]  # a conversation's later turns resend its prompt whole:
-                                                              # it can already be read; across them, not
+        firsts, opening = set(), []                          # each conversation's first use of each prompt: its later
+        for c in cs:                                         # turns and requests resend the same prompt and can already
+            k = (st["conv"].get(id(c)), c["sys_prefix"][-1][1])   # read it; across conversations, not
+            if id(c) in st["opening"] and k not in firsts:
+                firsts.add(k)
+                opening.append(c)
         if len(cs) < 2 or latest["sys_prefix"][-1][0] < st["floor_chars"][latest["model"]]:
             continue
         floor = cache_min(st["model"])
         distinct = list({c["sys_prefix"][-1][1]: c for c in cs}.values())
         start = _lcp(distinct) / CHARS_PER_TOKEN
+        if len(distinct) < 2 or start >= floor:              # one prompt, or prompts sharing a cacheable start: nothing
+            continue                                         # to reorder
         tail = min(_common(distinct[0]["sys_suffix"], d["sys_suffix"]) for d in distinct[1:]) / CHARS_PER_TOKEN \
             if len(distinct) > 1 else 0.0
         usd = share = None
@@ -1725,28 +1784,41 @@ def detect_system_order(rep: Report) -> list[Lever]:
         if tail >= floor:
             gain, prev = 0.0, {}                           # the cache is per model and setting (tools come first)
             premium = "wl" if rep.host.prefix_ttl == "1h" else "w"
-            for c in opening:
+            priced = {id(c) for c in opening}
+            for c in cs:                                      # every request keeps the entry warm; only each
+                k = (c["model"], c.get("setting_rest"))       # conversation's first use of its prompt is priced
+                st_k = prev.get(k)                            # (ready: when a write finishes; last: its latest use)
+                warm = bool(st_k) and st_k["ready"] <= c["start"] and c["start"] - st_k["last"] <= ttl
                 pf = rep.profiles.get(c["model"])
-                if pf is None:
-                    continue
-                p = pf.at(c["uncached"] + c["cache_read"] + c["cache_write"])   # the card the whole prompt pays
-                k = (c["model"], c.get("setting_rest"))
-                scale = p.batch if c.get("batch") else 1.0
-                if k in prev and c["start"] - prev[k] <= ttl:
-                    gain += tail * p.p * (1 - p.r) * scale
-                    tokens += tail
-                else:
-                    gain -= tail * p.p * (getattr(p, premium) - 1) * scale
-                prev[k] = c["start"]
+                if id(c) in priced and pf is not None:
+                    p = pf.at(c["uncached"] + c["cache_read"] + c["cache_write"])   # the card the whole prompt pays
+                    scale = p.batch if c.get("batch") else 1.0
+                    if warm:
+                        gain += tail * p.p * (1 - p.r) * scale
+                        tokens += tail
+                    else:
+                        gain -= tail * p.p * (getattr(p, premium) - 1) * scale
+                if warm:
+                    st_k["last"] = c["start"]
+                else:                                         # it writes: readable once it has finished (one already
+                    ready = c["start"] + (c.get("latency") or 0)   # in flight, within the lifetime, may finish first)
+                    if st_k and st_k["ready"] > c["start"] and c["start"] - st_k["last"] <= ttl:
+                        ready = min(ready, st_k["ready"])
+                    prev[k] = {"ready": ready, "last": c["start"]}
             if gain > 0:
                 usd = gain
                 bill = rep.job_bill({job})
                 share = gain / bill if bill else None
-        note = (f"job {job}'s system prompts differ from their first ~{start:,.0f} tokens on, under {st['model']}'s "
-                f"{floor:,}-token cache minimum, so no conversation can reuse another's: put the per-request part after "
-                "the fixed instructions"
+        where = ("share nothing from the start" if start < 1 else f"share only their first ~{start:,.0f} tokens")
+        advice = ("put the per-request part after the fixed instructions" if start < 1 else
+                  "a fixed part that short is not cached across conversations; if more fixed instructions follow the "
+                  "per-request part, put the per-request part after them")
+        note = (f"job {job}'s system prompts {where}, under {st['model']}'s {floor:,}-token cache minimum, so no "
+                f"conversation can reuse another's: {advice}"
                 + (f"; the last ~{tail:,.0f} tokens are the same in all of them, and put first they would have saved "
-                   f"about {_usd(usd)} over these {len(opening)} conversations" if usd else ""))
+                   f"about {_usd(usd)} over these {len(opening)} conversations" if usd else "")
+                + ". Changes to these prompts are not counted as setting changes: the realized-against-predicted check "
+                  "is the guard")
         out.append(Lever(f"fix.system_order.{job}", "fix_cause", job, tokens * rep.per_week,
                          None if usd is None else usd * rep.per_week, share, False, state="finding",
                          evidence={"stable_start_tokens": round(start), "shared_end_tokens": round(tail), "calls": len(cs),
@@ -2048,8 +2120,11 @@ def check(lever_id: str, rep: Report, entry: dict) -> dict:
         guard = f"{missed} batch deadlines missed" if missed else None   # a night whose batch never finished and was rerun
     elif lever_id.startswith("memory.") and entry.get("action"):
         part = lever_id.split(".")[1].split("_")[0]
-        before = [m.get(part) for r, m in rep.meta.items() if m.get(part) and r in {c["run"] for c in rep.calls if c["start"] < since}]
-        typical = entry.get("typical_before") or (sorted(before)[len(before) // 2] if before else None)   # the
+        typical = entry.get("typical_before")              # the served size before the apply, saved once; else read
+        if not typical:                                    # from this window's runs before it (their set built once)
+            prior = {c["run"] for c in rep.calls if c["start"] < since}
+            before = [m.get(part) for r, m in rep.meta.items() if m.get(part) and r in prior]
+            typical = sorted(before)[len(before) // 2] if before else None   # the
         rs = [r for r in after.runs(_agent(after)) if r.model in after.profiles]   # served size before the apply, not this window
         runs, realized = len(rs), 0.0
         for r in rs:
@@ -2141,10 +2216,34 @@ def worth_listing(lv: "Lever") -> bool:
     return lv.kind != "applied" or lv.state != "available" or (lv.saves_usd or 0) > 0.005
 
 
+def live_checks(layout, tenant: str, host: HostShape, rep: "Report", *, prices: Optional[dict] = None) -> list[dict]:
+    """Each applied lever's check as of now, for a plain `recant cost`: the same check and judgement as the nightly
+    pass, once the lever's window is complete (50 runs or 7 days), computed in memory and written nowhere. Only the
+    nightly pass records a check, and reverts a safe lever whose guard trips or that loses money."""
+    out = []
+    now = rep.until
+    for lid, entry in overlay(layout, tenant).items():
+        entry = dict(entry)
+        if "assumed_calls" not in entry or (lid.startswith("memory.") and "typical_before" not in entry):
+            entry.update(baseline(layout, tenant, host, lid, entry, prices=prices))
+        res = check(lid, rep, entry)
+        if not res["complete"]:
+            continue
+        j = judge(res, entry)
+        e = {"id": lid, "kind": entry["kind"], "event": "checked", "at": now, "action": entry["action"], "live": True,
+             "realized_usd": res["realized_usd"], "predicted_window_usd": res["predicted_usd"], "window_runs": res["runs"],
+             "window_calls": j["calls"], "assumed_calls": j["assumed_calls"], "verdict": j["verdict"],
+             "realized_per_call": j["realized_per_call"], "predicted_per_call": j["predicted_per_call"], "ratio": j["ratio"]}
+        e["note"] = delivered_line(e)
+        out.append(e)
+    return out
+
+
 def nightly(layout, tenant: str, host: HostShape, *, prices: Optional[dict] = None, log=None, on_advice=None,
             now: Optional[float] = None, apply_safe: bool = True, show_all: bool = True) -> dict:
-    """The nightly pass: the last 7 days; the price table's age; check each applied lever, revert what did not
-    deliver or tripped a guard; apply what is newly eligible; write the report to the store."""
+    """The nightly pass: the last 7 days; the price table's age; check each applied lever, revert what loses money
+    (realized below noise) or tripped a guard (a lever that saves less than predicted stays on, its check saying so);
+    apply what is newly eligible; write the report to the store."""
     now = now or datetime.now(timezone.utc).timestamp()
     rep = report(layout, tenant, host, since=now - WEEK, until=now, prices=prices)
     events = []
