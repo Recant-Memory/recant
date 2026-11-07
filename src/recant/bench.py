@@ -234,7 +234,16 @@ def load_hook(spec: Optional[str]) -> Optional[Callable]:
         raise SystemExit(f"a hook is module:function, not {spec!r}")
     if os.getcwd() not in sys.path:
         sys.path.insert(0, os.getcwd())
-    return getattr(importlib.import_module(mod), fn)
+    try:
+        m = importlib.import_module(mod)
+    except ModuleNotFoundError as exc:
+        if exc.name and (exc.name == mod or mod.startswith(exc.name + ".")):
+            raise SystemExit(f"{spec}: no module {mod!r} here; it is imported from the current directory, so run from "
+                             "where it lives or put its folder on PYTHONPATH") from None
+        raise                                    # a module it imports is missing: the host's own import, shown as it is
+    if not callable(getattr(m, fn, None)):
+        raise SystemExit(f"{spec}: module {mod!r} has no function {fn!r}")
+    return getattr(m, fn)
 
 
 def default_client(is_async: bool):
@@ -868,13 +877,14 @@ def verdict_lines(r: dict) -> list[str]:
     for p in r["predictions"]:
         if p.get("ratio") is None or p["id"] == "cost per task":
             continue
-        lines.append(f"prediction {'met' if p['met'] else 'MISSED'}: {p['id']} (arm {p['arm']}) realized ${p['realized_usd']:.4f} "
-                     f"against ${p['predicted_usd']:.4f} predicted ({p['ratio']:.0%}; met within a quarter)")
+        lines.append(f"prediction {'met' if p['met'] else 'MISSED'}: {p['id']} (arm {p['arm']}) saved ${p['realized_usd']:.4f} over "
+                     f"the arm's {r['header'].get('tasks_paired', '?')} paired tasks, against ${p['predicted_usd']:.4f} predicted "
+                     f"({p['ratio']:.0%}; met within a quarter)")
     fa, fb = r["failures"]["A"]["failed_tasks"], r["failures"]["B"]["failed_tasks"]
     if fa != fb:
-        lines.append(f"failures differ: arm A {fa} failed tasks, arm B {fb}; failed tasks count as failed, none dropped")
+        lines.append(f"runs that raised differ: arm A {fa}, arm B {fb}; each counts as a failed task, none dropped")
     elif fa:
-        lines.append(f"failures: {fa} failed tasks in each arm, counted as failed, none dropped")
+        lines.append(f"runs that raised: {fa} in each arm, each counted as a failed task, none dropped")
     for name, d in r["discarded"].items():
         if d["calls"]:
             lines.append(f"arm {name}: {d['attempts']} interrupted attempts discarded ({d['calls']} calls, ${d['usd']:.4f}, "
@@ -935,10 +945,11 @@ def render(r: dict) -> str:
     L.append("")
     if r.get("quality"):
         q = r["quality"]
-        L += ["## Quality", "", f"Pass rate: A {q['pass_rate']['A']:.1%}, B {q['pass_rate']['B']:.1%}; paired difference "
-              f"{q['difference'] * 100:+.1f} points (95% {q['interval'][0] * 100:+.1f} to {q['interval'][1] * 100:+.1f}). "
-              "Held means no observed loss and the interval no worse than −3 points: "
-              f"**{'held' if q['held'] else q['verdict']}**.", ""]
+        said = next((x for x in r.get("verdict") or [] if x.startswith("quality")), None)   # the verdict's own line: one
+        L += ["## Quality", "", (said[0].upper() + said[1:] + ".") if said else "", "",   # reading, not two
+              f"For reference: pass rate A {q['pass_rate']['A']:.1%}, B {q['pass_rate']['B']:.1%}; paired difference "
+              f"{q['difference'] * 100:+.1f} points (95% {q['interval'][0] * 100:+.1f} to {q['interval'][1] * 100:+.1f}); "
+              "for an arm with an opted-in lever, held means no observed loss and the interval no worse than −3 points.", ""]
     else:
         L += ["## Quality", "", "Not measured: no grader was given.", ""]
     L += ["## Latency (seconds; Recant's own time in ms)", "", "| | per call p50 / p95 | per task p50 / p95 | first token p50 / p95 | Recant's own time p50 / p95 |",
@@ -951,13 +962,19 @@ def render(r: dict) -> str:
     L += ["", f"Paired task time difference (B − A): {lp['delta']:+.2f} s (95% {lp['interval'][0]:+.2f} to {lp['interval'][1]:+.2f}).", ""]
     L += ["## Predicted against realized", ""]
     for p in r["predictions"]:
-        L.append(f"- arm {p['arm']} {p['id']}: realized ${_f(p.get('realized_usd'))} against ${_f(p.get('predicted_usd'))} predicted"
+        what = ("realized" if p["id"] == "cost per task" else
+                f"saved over the arm's {r['header'].get('tasks_paired', '?')} paired tasks:")
+        L.append(f"- arm {p['arm']} {p['id']}: {what} ${_f(p.get('realized_usd'))} against ${_f(p.get('predicted_usd'))} predicted"
                  + (f" ({p['ratio']:.0%})" if p.get("ratio") else ""))
     L += ["", "## Failures and equivalence", ""]
     for name in ("A", "B"):
         f_ = r["failures"][name]
         e = r["equivalence"][name]
-        L.append(f"- arm {name}: {f_['failed_tasks']} failed tasks, {f_['failed_calls']} failed calls {f_['errors'] or ''}; "
+        L.append(f"- arm {name}: {f_['failed_tasks']} runs that raised (a task that ran and scored 0 counts in the pass rate, "
+                 f"not here), {f_['failed_calls']} failed calls {f_['errors'] or ''}; "
                  f"equivalence {e['equivalent']} of {e['equivalent'] + e['not_equivalent']} calls")
-    L += ["", "## Setup", "", json.dumps(r.get("setup")) if r.get("setup") else "no friction log", ""]
+    setup = r.get("setup") or {}
+    L += ["", "## Setup (from the local friction log: how getting here went)", ""]
+    L += [f"- {k.replace('_', ' ')}: {v}" for k, v in setup.items()] if setup else ["no friction log"]
+    L += [""]
     return "\n".join(L)

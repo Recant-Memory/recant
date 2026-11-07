@@ -99,7 +99,7 @@ def test_the_notes_example_keeps_what_was_said_refuses_what_was_not_and_answers_
 def test_the_cost_quickstart_runs_its_readme_sequence_end_to_end(tmp_path, capsys):
     from recant import cli
     store, cq = str(tmp_path / "store"), _load("cost_quickstart")
-    cost = lambda *a: (cli.main(["cost", "--store", store, "--tenant", "demo", *a]), capsys.readouterr().out)[1]   # noqa: E731
+    cost = lambda *a: (cli.main(["cost", "--store", store, *a]), capsys.readouterr().out)[1]   # noqa: E731
     cq.main([store, "--tasks", "30", "--offline"])
     assert "levers carried out on the last call: none" in capsys.readouterr().out
     assert re.search(r"available\s+breakpoint\.add\s+\$\d", cost())

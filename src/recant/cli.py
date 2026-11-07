@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -68,7 +69,8 @@ def run_cost(layout, tenant, host, *, prices=None, since="7d", until=None, as_js
     bill = cs.billing_findings(layout, tenant)          # None without billing access
     levers += bill or []
     if as_json:
-        return json.dumps({"shape": rep.shape, "levers": [vars(lv) for lv in levers], "overlay": cs.overlay(layout, tenant),
+        ready = {lv.id for lv in levers if cs.eligible(rep, lv, ledger_=cs.ledger(layout, tenant))[0]}
+        return json.dumps({"summary": cs.lead(rep, levers, ready), "shape": rep.shape, "levers": [vars(lv) for lv in levers], "overlay": cs.overlay(layout, tenant),
                            "coverage": rep.coverage(),
                            "billing": "reconciled" if bill is not None else "not visible"}, indent=1, default=str)
     from .billing import NOT_VISIBLE
@@ -104,6 +106,83 @@ def run_coverage(usage_path, store=None, tenant=None, *, prices=None, as_json=Fa
     return json.dumps(r, indent=1, default=str) if as_json else coverage.render_reconcile(r)
 
 
+def emit(obj, command: str) -> None:
+    """A command's JSON on stdout, naming its schema: within one version, fields are added, never renamed or removed."""
+    if isinstance(obj, str):
+        obj = json.loads(obj)
+    print(json.dumps({"schema": f"recant-{command}/1", **obj} if isinstance(obj, dict) else obj, indent=1, default=str))
+
+
+def _progress(a):
+    """Where progress lines go: stdout, or stderr when --json keeps stdout for the JSON alone."""
+    return (lambda *x: print(*x, file=sys.stderr, flush=True)) if getattr(a, "json", False) else print
+
+
+def run_apply(a) -> int:
+    """`recant apply`: the safe levers that are ready, applied (or, with --dry-run, described); each one not ready says
+    why in a line."""
+    from . import costshape as cs_
+    from . import home
+    store = a.store or str(home.default_store())
+    layout = StoreLayout(store)
+    if not layout.log_dir(a.tenant).is_dir():
+        raise SystemExit(f"no calls metered yet in {store}: wrap your client with recant.wrap(client), run your app, then "
+                         "run recant cost and recant apply")
+    host = _host(None, layout, a.tenant)
+    rep = cs_.report(layout, a.tenant, host)
+    led = cs_.ledger(layout, a.tenant)
+    levers = cs_.advise(rep, overlay=cs_.overlay(layout, a.tenant), ledger=led)
+    safe = [lv for lv in levers if cs_.label_of(lv) == "automatic" and lv.state == "available" and (lv.share or 0) > 0]
+    on = sorted(k for k, v in cs_.overlay(layout, a.tenant).items() if isinstance(v, dict) and v.get("kind") == "applied")
+    done, waiting = [], []
+    for lv in safe:
+        ok, why = cs_.eligible(rep, lv, ledger_=led)
+        change = cs_.CHANGES.get(lv.id, "changes cache markers only")
+        only = (lv.action or {}).get("jobs") if isinstance(lv.action, dict) else None
+        left_out = sorted({c["job"] for c in rep.calls if c["job"] in cs_._agent(rep)} - set(only)) \
+            if only and lv.job == "agent" else []                          # the jobs with calls that it leaves off
+        row = {"id": lv.id, "saves_share": lv.share, "change": change, "jobs": sorted(cs_.lever_jobs(rep, lv.job, lv.action)),
+               "left_out": left_out}
+        if not ok:
+            waiting.append(dict(row, why=why))
+        elif a.dry_run:
+            done.append(dict(row, applied=False))
+        else:
+            cs_.apply(layout, a.tenant, rep, lv)
+            done.append(dict(row, applied=True))
+    if a.json:
+        emit({"applied" if not a.dry_run else "would_apply": done, "not_ready": waiting, "already_on": on,
+              "dry_run": a.dry_run}, "apply")
+        return 0
+    verb = "would apply" if a.dry_run else "applied"
+    for r in done:
+        jobs = " + ".join(r["jobs"])
+        print(f"{verb} {r['id']} on {'job' if len(r['jobs']) == 1 else 'jobs'} {jobs} (saves about {r['saves_share']:.0%} "
+              f"of {'its' if len(r['jobs']) == 1 else 'their'} bill): {r['change']}."
+              + (f" Left off {', '.join(r['left_out'])}: there it would cost more than it saves (a cache written and not "
+                 "read back, or a prompt under the model's cache minimum)." if r["left_out"] else ""))
+    for r in waiting:
+        print(f"not yet {r['id']}: {r['why']}.")
+    if not (done or waiting):
+        print(f"already on: {', '.join(on)}; nothing more to apply." if on else
+              "nothing to apply: recant cost found no safe saving on this traffic.")
+    if done and not a.dry_run:
+        print("The next wrapped call carries it out. recant cost shows realized against predicted after 50 runs or 7 days; "
+              "recant off makes the wrapper a pure pass-through again.")
+    return 0
+
+
+START = """\
+start here:
+  1. in your code:  client = recant.wrap(anthropic.Anthropic())   (or AsyncAnthropic; nothing else changes)
+  2. run your app as you normally do (no configuration: the store is ./.recant)
+  3. recant cost     what you spent, and what Recant would save with no change to what the model sees
+  4. recant apply    turn those savings on (--dry-run shows each change first)
+
+for coding agents: never change prompts, models, max_tokens or effort to save cost; every command takes --json;
+recant doctor checks the setup. AGENTS.md and llms.txt (github.com/recant-memory/recant) have the full recipe."""
+
+
 def main(argv=None) -> int:
     """Every command appends to the friction log: when, which, and how it failed."""
     from . import friction
@@ -112,6 +191,8 @@ def main(argv=None) -> int:
         sys.stdout.reconfigure(line_buffering=True)      # 4 KB blocks
     except (AttributeError, ValueError):
         pass
+    if argv[:1] == ["doctor"]:                           # doctor makes nothing: not even the friction log
+        friction = _Quiet()
     friction.started(argv)
     try:
         code = _main(argv)
@@ -121,21 +202,81 @@ def main(argv=None) -> int:
         else:
             friction.finished(argv, 0)
         raise
-    except BaseException as exc:
-        friction.failed(argv, exc)
+    except KeyboardInterrupt:
+        friction.failed(argv, KeyboardInterrupt())
         raise
+    except Exception as exc:                             # one line, never a traceback (RECANT_DEBUG=1 shows it)
+        friction.failed(argv, exc)
+        if os.environ.get("RECANT_DEBUG"):
+            raise
+        print(_one_line(argv, exc), file=sys.stderr)
+        return 3 if _ours(exc) else 2
     friction.finished(argv, code)
     return code
 
 
+def _ours(exc: BaseException) -> bool:
+    """A failure in Recant's own code, not a mistake in what it was given. A missing file, a path that cannot be used,
+    an invalid store or a bad value (Recant's own checks raise ValueError on input) is the caller's to fix. Any other
+    exception is Recant's when the deepest frame it passed through outside Python's standard library is Recant's
+    code, and the caller's when that frame is theirs (a --run, --grade, --client or --load hook)."""
+    import sysconfig
+    from .store.layout import LayoutError
+    if isinstance(exc, (OSError, ValueError, LayoutError)):
+        return False
+    paths = sysconfig.get_paths()
+    std = tuple(os.path.abspath(paths[k]) + os.sep for k in ("stdlib", "platstdlib"))
+    installed = tuple(os.path.abspath(paths[k]) + os.sep for k in ("purelib", "platlib"))   # site-packages sits inside
+    here = os.path.dirname(os.path.abspath(__file__)) + os.sep                            # the stdlib directory
+    tb, deepest = exc.__traceback__, None
+    while tb is not None:
+        f = os.path.abspath(tb.tb_frame.f_code.co_filename)
+        if not f.startswith(std) or f.startswith(installed):
+            deepest = f
+        tb = tb.tb_next
+    return deepest is None or deepest.startswith(here)
+
+
+def _one_line(argv, exc: BaseException) -> str:
+    from .store.layout import LayoutError
+    cmd = " ".join(a for a in argv if not a.startswith("-"))[:40] or "recant"
+    msg = str(exc).strip().splitlines()[0][:300] if str(exc).strip() else type(exc).__name__
+    if isinstance(exc, FileNotFoundError):
+        return f"recant {cmd}: no such file: {exc.filename or msg}. Check the path."
+    if isinstance(exc, PermissionError):
+        return f"recant {cmd}: not allowed to write or read {exc.filename or msg}. Use a directory you can write to."
+    if isinstance(exc, json.JSONDecodeError):
+        return f"recant {cmd}: a file is not valid JSON ({msg}). Check the file the command reads."
+    if isinstance(exc, LayoutError):
+        return f"recant {cmd}: {msg}."
+    if not _ours(exc):
+        return f"recant {cmd}: {type(exc).__name__}: {msg}"
+    return (f"recant {cmd}: an error in Recant itself ({type(exc).__name__}: {msg}). It is ours to fix: please open an "
+            "issue on github.com/recant-memory/recant with `recant feedback`'s bundle; RECANT_DEBUG=1 shows the traceback.")
+
+
+class _Quiet:
+    """The friction log's interface, writing nothing."""
+
+    def __getattr__(self, name):
+        return lambda *a, **k: None
+
+
+class _Parser(argparse.ArgumentParser):
+    """argparse, with a usage mistake as one line on stderr (exit 2), pointing at --help."""
+
+    def error(self, message):
+        self.exit(2, f"{self.prog}: {message} (see {self.prog} --help)\n")
+
+
 def _main(argv) -> int:
     from .version import line as version_line
-    ap = argparse.ArgumentParser(prog="recant")
+    ap = _Parser(prog="recant", formatter_class=argparse.RawDescriptionHelpFormatter, epilog=START)
     ap.add_argument("--version", action="version", version=version_line())
     sub = ap.add_subparsers(dest="cmd", required=True)
     c = sub.add_parser("cost", help="the cost advisor on a store's log (costs nothing)")
-    c.add_argument("--store", required=True, help="the store directory recant.wrap (or your Meter) writes into")
-    c.add_argument("--tenant", required=True, help="the tenant id you passed to recant.wrap")
+    c.add_argument("--store", help="the store recant.wrap (or your Meter) writes into; default $RECANT_HOME or ./.recant")
+    c.add_argument("--tenant", help="the tenant id you passed to recant.wrap; default \"default\"")
     c.add_argument("--since", default="7d", help="the window's start: Nd (the last N days), a date (2026-11-01) or an ISO time; default 7d")
     c.add_argument("--until", help="the window's end, a date or an ISO time; default now")
     c.add_argument("--host", help="a host.json describing how your log divides into runs; default the one recant.wrap wrote into the store")
@@ -150,10 +291,21 @@ def _main(argv) -> int:
     c.add_argument("--action", type=json.loads, help="for --opt-in: what the lever does, as JSON, such as '{\"effort\": \"medium\"}'")
     c.add_argument("--evidence", default="", help="for --opt-in: what shows it holds quality, such as a bench directory")
     c.add_argument("--all", dest="show_all", action="store_true", help="list levers that save nothing in this window too")
+    dr = sub.add_parser("doctor", help="check the setup in one go (costs nothing): one line per check, and what to do for each problem")
+    dr.add_argument("--store", help="the store to check; default $RECANT_HOME or ./.recant")
+    dr.add_argument("--tenant", help="the tenant id; default \"default\"")
+    dr.add_argument("--json", action="store_true", help="print the checks as JSON")
+    ap_ = sub.add_parser("apply", help="turn on the safe savings recant cost found (cache markers only; what the model "
+                         "sees is unchanged); recant off undoes everything")
+    ap_.add_argument("--store", help="the store recant.wrap writes into; default $RECANT_HOME or ./.recant")
+    ap_.add_argument("--tenant", help="the tenant id; default \"default\"")
+    ap_.add_argument("--dry-run", action="store_true", help="show what each lever would change in a request, change nothing")
+    ap_.add_argument("--json", action="store_true", help="print the result as JSON")
     for name, what in (("off", "the wrapper a pure pass-through from the next call; --meter keeps metering only"),
                        ("on", "the wrapper on again from the next call"), ("status", "the switch in force")):
         sw = sub.add_parser(name, help=what)
-        sw.add_argument("--store", required=True, help="the store whose switch to set or read")
+        sw.add_argument("--store", help="the store whose switch to set or read; default $RECANT_HOME or ./.recant")
+        sw.add_argument("--json", action="store_true", help="print the switch as JSON (it always is)")
         if name == "off":
             sw.add_argument("--meter", action="store_true", help="meter every call, change nothing on the request")
     b = sub.add_parser("bench", help="CALLS THE MODEL: Recant against no Recant on your own tasks, paired and fair")
@@ -176,6 +328,7 @@ def _main(argv) -> int:
     b.add_argument("--estimate", action="store_true", help="run the first task, print the estimated spend, stop")
     b.add_argument("--allow-mixed", action="store_true", help="resume a bench started on another Recant version")
     b.add_argument("--report", action="store_true", help="only rebuild the report of the bench in --out")
+    b.add_argument("--json", action="store_true", help="print the report (or the estimate) as JSON on stdout; progress goes to stderr")
     ev = sub.add_parser("eval", help="CALLS THE MODEL: measure memory on your own sessions").add_subparsers(dest="what", required=True)
     em = ev.add_parser("memory", help="four arms over your past sessions: none, carried history, managed notes, memory v2")
     em.add_argument("--sessions", help="sessions.jsonl: {scope, ts, messages} per line")
@@ -188,24 +341,45 @@ def _main(argv) -> int:
     em.add_argument("--window", type=int, default=150_000, help="carried history's window, in estimated tokens; default 150000")
     em.add_argument("--out", help="the eval directory; default eval/<UTC stamp>; an existing one resumes")
     em.add_argument("--parallel", type=int, default=1, help="scopes built and answered at once; default 1")
+    em.add_argument("--json", action="store_true", help="print the result as JSON on stdout; progress goes to stderr")
     em.add_argument("--estimate", action="store_true", help="run every arm on the first scope only (under --out/estimate), "
                     "print the whole run's estimated spend, stop")
     cv = sub.add_parser("coverage", help="what Recant saw of your traffic, against your own per-run totals (costs nothing)")
     cv.add_argument("--usage", required=True, help="your per-run log, JSON lines: ts, model, tokens_in, tokens_out, cache_read, "
                                                    "cache_write, optional billed (api_key | subscription)")
-    cv.add_argument("--store", help="the store Recant metered into (none: compare against an empty meter)")
+    cv.add_argument("--store", help="the store Recant metered into; default $RECANT_HOME or ./.recant when it exists, "
+                    "else an empty meter")
     cv.add_argument("--tenant", help="the tenant id, with --store")
     cv.add_argument("--prices", help="a price table, as for recant cost; default the library's list prices")
     cv.add_argument("--json", action="store_true", help="print the comparison as JSON")
-    fb = sub.add_parser("feedback", help="write a numbers-only feedback bundle (and a short form); sends nothing")
+    fb = sub.add_parser("feedback", help="write a numbers-only feedback bundle (and a short form); sends nothing",
+                        description="The six questions, in order (each optional; piped answers work, one per line, then "
+                        "y or n to write): minutes from install to your first report; where you had to read Recant's code "
+                        "or guess; the errors you hit; what you wanted to measure and couldn't; whether you would leave it "
+                        "on; anything else.")
     fb.add_argument("--bench", nargs="*", help="bench directories (default: every bench/*/ with a report)")
     fb.add_argument("--eval", nargs="*", dest="evals", help="eval directories (default: every eval/*/ with a report)")
     fb.add_argument("--store", help="a store whose recant cost summary goes in too")
     fb.add_argument("--tenant", help="the tenant id, with --store")
     fb.add_argument("--no-form", action="store_true", help="skip the six questions; the bundle carries numbers only")
+    fb.add_argument("--json", action="store_true", help="print the bundle as JSON with no form, and write nothing (writing "
+                    "always asks first)")
     a = ap.parse_args(argv)
+    from . import home
+    if a.cmd in ("coverage", "feedback") and not getattr(a, "store", None) and home.default_store().is_dir():
+        a.store = str(home.default_store())          # the store recant.wrap(client) writes to, when there is one
+    if getattr(a, "tenant", None) is None and a.cmd in ("cost", "apply", "coverage", "feedback"):
+        a.tenant = home.DEFAULT_TENANT if (a.cmd in ("cost", "apply") or a.store) else None
+    if a.cmd == "apply":
+        return run_apply(a)
+    if a.cmd == "doctor":
+        from . import doctor
+        checks = doctor.run(a.store or home.default_store(), a.tenant or home.DEFAULT_TENANT)
+        emit({"checks": checks, "ok": all(c["ok"] for c in checks)}, "doctor") if a.json else print(doctor.render(checks))
+        return 0 if all(c["ok"] for c in checks) else 1
     if a.cmd == "coverage":
-        print(run_coverage(a.usage, a.store, a.tenant, prices=_prices(a.prices), as_json=a.json))
+        out_ = run_coverage(a.usage, a.store, a.tenant, prices=_prices(a.prices), as_json=a.json)
+        emit(out_, "coverage") if a.json else print(out_)
         return 0
     if a.cmd == "feedback":
         from . import feedback as fb_
@@ -218,6 +392,10 @@ def _main(argv) -> int:
             cost = {"shape": cost.get("shape"), "coverage": cost.get("coverage"),
                     "levers": [{"id": lv.get("id"), "kind": lv.get("kind"), "state": lv.get("state"), "saves_usd": lv.get("saves_usd"),
                                 "share": lv.get("share")} for lv in cost.get("levers", [])]}
+        if a.json:                                   # an agent's view: the numbers only, nothing written, nothing asked
+            bundle, dropped = fb_.build(bench_dirs=benches, eval_dirs=evals, cost_json=cost, form=None)
+            emit({"bundle": bundle, "strings_left_out": dropped, "written": None}, "feedback")
+            return 0
         fb_.run(bench_dirs=benches, eval_dirs=evals, cost_json=cost, form=not a.no_form)
         return 0
     if a.cmd == "eval":
@@ -232,13 +410,17 @@ def _main(argv) -> int:
         out.mkdir(parents=True, exist_ok=True)
         if a.make_questions:
             r = em_.make_questions(sessions, raw=raw_sdk(False), model=a.model, out_path=a.questions, root=out, per_scope=a.per_scope)
+            if a.json:
+                emit(dict(r, questions_path=str(Path(a.questions).resolve()),
+                          drafting_store=str((out / "questions-store").resolve())), "eval-questions")
+                return 0
             print(json.dumps(r, indent=1, default=str))
             print(f"questions written: {Path(a.questions).resolve()} (--questions); the drafting calls were metered in "
                   f"{(out / 'questions-store').resolve()} (--out)")
             if r.get("keys_to_check"):
                 print(f"{len(r['keys_to_check'])} keys to check (longer than two words, or holding words their question "
                       "already says): each must hold the value and only the value (every word of a key must be in the "
-                      "reply). A suggestion drops the question's words from the key's ends; take it only where those "
+                      "reply). A suggestion drops the question's words from the key's start; take it only where those "
                       "words are not part of the value. Nothing was changed:")
                 for k in r["keys_to_check"]:
                     print(f"  {k['id']}: {k['answer']}" + (f"   (suggested: {k['suggested']})" if k.get("suggested") else ""))
@@ -248,41 +430,55 @@ def _main(argv) -> int:
             return 0
         if a.estimate:
             est = em_.estimate(sessions, a.questions, raw=raw_sdk(False), model=a.model, out=str(out / "estimate"),
-                               arms=tuple(a.arms.split(",")), window_tokens=a.window)
+                               arms=tuple(a.arms.split(",")), window_tokens=a.window, say=_progress(a))
+            if a.json:
+                emit(est, "eval-estimate")
+                return 0
             print(f"recant eval memory: estimated spend ${est['estimated_usd']:.2f} for {est['questions']} questions over "
                   f"{est['scopes']} scopes and {len(est['arms'])} arms (the first scope ran: ${est['spent_usd']:.2f} for "
                   f"{est['questions_run']} questions; answers scaled by questions, write paths by scopes). Nothing else ran.")
             return 0
         em_.evaluate(sessions, a.questions, raw=raw_sdk(False), model=a.model, out=str(out), arms=tuple(a.arms.split(",")),
-                     window_tokens=a.window, parallel=a.parallel)
-        print((out / "report.md").read_text())
+                     window_tokens=a.window, parallel=a.parallel, say=_progress(a))
+        emit((out / "report.json").read_text(), "eval-report") if a.json else print((out / "report.md").read_text())
         return 0
     if a.cmd == "bench":
         from . import bench as bench_
         if a.report:
             if not a.out:
                 ap.error("--report needs --out, the bench directory")
-            print(bench_.render(bench_.build_report(a.out, prices=_prices(a.prices))))
+            r = bench_.build_report(a.out, prices=_prices(a.prices))
+            emit(r, "bench-report") if a.json else print(bench_.render(r))
             return 0
         if not (a.tasks and a.run):
             ap.error("recant bench needs --tasks and --run")
-        bench_.run(tasks_path=a.tasks, run_spec=a.run, grade_spec=a.grade, n=a.n, calibrate=a.calibrate, arm_a=a.arm_a,
-                   arm_b=a.arm_b or a.mode, out=a.out, yes=a.yes, estimate_only=a.estimate, store=a.store, client_spec=a.client,
-                   allow_mixed=a.allow_mixed, prices=_prices(a.prices), parallel=a.parallel)
+        r = bench_.run(tasks_path=a.tasks, run_spec=a.run, grade_spec=a.grade, n=a.n, calibrate=a.calibrate, arm_a=a.arm_a,
+                       arm_b=a.arm_b or a.mode, out=a.out, yes=a.yes, estimate_only=a.estimate, store=a.store,
+                       client_spec=a.client, allow_mixed=a.allow_mixed, prices=_prices(a.prices), parallel=a.parallel,
+                       say=_progress(a))
+        if a.json:
+            emit(r, "bench-estimate" if a.estimate else "bench-report")
         return 0
     if a.cmd in ("off", "on", "status"):
         from . import switch
+        a.store = str(home.store_or_default(a.store))
         if a.cmd != "status":
             switch.set_state(a.store, "meter" if getattr(a, "meter", False) else a.cmd)
-        print(json.dumps(switch.describe(a.store), indent=1))
+        emit(switch.describe(a.store), "switch")
         return 0
+    if a.store is None:
+        a.store = str(home.default_store())
+        if not (home.default_store() / "tenants" / a.tenant).exists():
+            raise SystemExit(f"no calls metered yet in {a.store}: wrap your client with recant.wrap(client), run your app, "
+                             "then run recant cost again (or pass --store DIR for another store)")
     layout = StoreLayout(a.store)
     if not (a.revert or a.opt_in):
         from . import friction
         friction.report("cost")
-    print(run_cost(layout, a.tenant, _host(a.host, layout, a.tenant), prices=_prices(a.prices), since=a.since, until=a.until,
-                   as_json=a.json, nightly=a.nightly, revert=a.revert, reason=a.reason, opt_in=a.opt_in, action=a.action,
-                   evidence=a.evidence, show_all=a.show_all))
+    out_ = run_cost(layout, a.tenant, _host(a.host, layout, a.tenant), prices=_prices(a.prices), since=a.since, until=a.until,
+                    as_json=a.json, nightly=a.nightly, revert=a.revert, reason=a.reason, opt_in=a.opt_in, action=a.action,
+                    evidence=a.evidence, show_all=a.show_all)
+    emit(out_, "cost") if (a.json or a.revert or a.opt_in) else print(out_)
     return 0
 
 

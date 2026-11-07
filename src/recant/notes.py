@@ -99,18 +99,41 @@ def _plain(s: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[`\"'’“”]", "", s or "")).strip().lower().strip(" .")
 
 
+_ARTICLE_OR_PRONOUN = ("a", "i")     # the only words left out: as written, lowercase, a single letter
+
+
 def parts(value) -> list[str]:
-    """The checkable parts of a value: its numbers, codes and words of two characters or more, each in
-    plain form. "EX0002, 2000.00" is ["ex0002", "2000.00"]: a composite value passes when every part is in the source."""
+    """The checkable parts of a value, each in plain form: its numbers, codes and words, single letters and digits
+    included ("A minus" is ["a", "minus"], "plan B" ["plan", "b"], "5" ["5"]). The one thing left out is a lowercase
+    "a" or "i" as written (an article or a pronoun); an uppercase single letter always counts. "EX0002, 2000.00" is
+    ["ex0002", "2000.00"]: a composite value passes when every part is in the source. (Before 0.4.0 every word under two
+    characters was left out, so "A minus" was not told from "B minus", nor "5" from "3".)"""
+    raw = re.findall(r"[A-Za-z0-9][A-Za-z0-9.\-/%@:]*", str(value or ""))
+    out = [_plain(m) for m in raw if not (len(m) == 1 and m in _ARTICLE_OR_PRONOUN)]
+    return [x for x in out if x] or ([_plain(str(value))] if _plain(str(value)) else [])
+
+
+def _found(part: str, t: str) -> bool:
+    """A part of two characters or more is found inside the text as before; a single letter or digit only as a whole
+    word, so "b" is not found in "but", nor "5" in "15"."""
+    if len(part) > 1:
+        return part in t
+    return re.search(rf"(?<![a-z0-9]){re.escape(part)}(?![a-z0-9])", t) is not None
+
+
+def _before_040(value) -> list[str]:
+    """The parts as read before 0.4.0: words of two or more characters, else the whole value."""
     out = [_plain(m) for m in re.findall(r"[A-Za-z0-9][A-Za-z0-9.\-/%@:]*", str(value or ""))]
     return [x for x in out if len(x) >= 2] or ([_plain(str(value))] if _plain(str(value)) else [])
 
 
 def holds(text_: str, value) -> bool:
-    """Every part of `value` appears in `text_` (plain forms)."""
+    """Every part of `value` appears in `text_` (plain forms; a single letter or digit as a whole word), and the value
+    also passes the rule before 0.4.0, so the check is only ever stricter than it was: a value of single letters
+    ("X Y") is still found only as written, in order, and not as "Y X"."""
     t = _plain(text_)
-    ps = parts(value)
-    return bool(ps) and all(x in t for x in ps)
+    ps, old = parts(value), _before_040(value)
+    return bool(ps) and all(_found(x, t) for x in ps) and bool(old) and all(x in t for x in old)
 
 
 def check(entry: dict, lines: Iterable, episode_path: str) -> tuple[Optional[str], Optional[str]]:

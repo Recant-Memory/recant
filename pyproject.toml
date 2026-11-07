@@ -4,13 +4,30 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "recant"
-version = "0.3.3"          # see CHANGELOG.md (above the empty 0.0.1 name reservation on PyPI)
-description = "A cost saver, managed memory and the measurement that sizes both, for any agent: meter your calls, apply the safe savings, keep checked notes, fall back to extracted memory."
+version = "0.4.0"         # see CHANGELOG.md (above the empty 0.0.1 name reservation on PyPI)
+description = "See what your Anthropic calls cost and what you'd save, with one line: recant.wrap(client), then recant cost and recant apply. Prompt-caching savings that change nothing the model sees, checked against their prediction; managed memory; and the bench that proves both."
+readme = "README.md"
+keywords = ["LLM cost", "Anthropic", "Claude", "prompt caching", "agent", "token usage", "cost tracking", "memory"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries",
+]
+
 requires-python = ">=3.11"
 license = "Apache-2.0"
 authors = [{ name = "GREYi, INC" }]
 license-files = ["LICENSE"]
 dependencies = ["pydantic>=2.7,<3", "pyyaml>=6", "python-ulid>=2"]
+
+[project.urls]
+Homepage = "https://github.com/recant-memory/recant"
+Source = "https://github.com/recant-memory/recant"
+Changelog = "https://github.com/recant-memory/recant/blob/main/CHANGELOG.md"
 
 [project.scripts]
 recant = "recant.cli:main"          # `recant cost`

@@ -1,18 +1,52 @@
 # Recant Memory
 
-> Makes an agent's context cost less for the same or better answers. Three parts, each usable alone: a cost saver
-> (meters every model call, prices each lever in dollars on the host's own traffic, applies the safe ones — cache
-> markers only — and checks and reverts them); managed memory (notes the agent writes and Recant checks, by default;
-> extracted memory with a review lifecycle as the fallback); and the measurement that sizes and checks both. A
-> library, not a service or an agent framework: it calls nothing on its own, sends nothing anywhere, and enforces no
-> spend limit.
+> Meters an Anthropic-SDK app's model calls on its normal traffic, says what they cost and what Recant would save
+> with no change to what the model sees, and applies those savings (cache markers only) on `recant apply`. Also
+> managed memory for agents and the measurement that checks both. A library, not a service or an agent framework: it
+> calls nothing on its own, sends nothing anywhere, and enforces no spend limit.
 
-Import name `recant`. Python 3.11+. The extra `recant[anthropic]` installs the Anthropic SDK, which `recant.wrap` and
-the reference client use.
+Import name `recant`. Python 3.11+. Works on any Python code that calls the Anthropic API through the `anthropic` SDK
+(`Anthropic` or `AsyncAnthropic`), sync, async, streaming or a tool loop.
+
+## Add it: the recipe (do exactly this)
+
+1. `pip install "recant[anthropic]"` (or add `recant[anthropic]` to the project's dependencies).
+2. Find where the app builds its Anthropic client and wrap it, one line, nothing else changed:
+
+   ```python
+   import anthropic, recant
+   client = recant.wrap(anthropic.Anthropic())          # sync
+   client = recant.wrap(anthropic.AsyncAnthropic())     # async: the same, awaited as before
+   ```
+
+   If the client is built in more than one place, wrap each. Keep every call as it is:
+   `client.messages.create(...)`, `create(stream=True)`, `client.messages.stream(...)` and `count_tokens` all work
+   unchanged. Optional, for two or more agents: put `with client.run("researcher", session=conversation_id):` (or
+   `async with`) around one agent's calls and `client.run("writer", ...)` around another's; a call outside any run
+   is the job "agent".
+3. Run the app as it normally runs. No configuration: the store is `./.recant/` in the working directory (or
+   `$RECANT_HOME`), made when the client is wrapped, with its own `.gitignore`.
+4. `recant cost`: the first three lines say what was spent, what Recant can save with no change to what the model
+   sees, and what that rests on. Below about 20 calls it says it is too early and sizes nothing; run more traffic.
+5. `recant apply --dry-run` shows each change; `recant apply` turns the safe savings on. `recant cost` later shows
+   the realized saving against the prediction.
+6. If anything looks wrong: `recant doctor` (one line per check, and what to do about each problem).
+
+The one rule: **never change prompts, models, `max_tokens`, effort or tools to save cost.** Recant changes only cache
+markers by itself; everything else it reports with its dollar size is the app owner's call, after `recant bench`
+shows quality holds. To verify the wrapper is a pass-through, `recant off` makes it one (nothing is metered), and
+`recant on` turns it back.
+
+For an agent: every command takes `--json` and prints one JSON object naming its schema (`"schema": "recant-cost/1"`,
+`recant-apply/1`, `recant-doctor/1`, ...; within a schema version fields are added, never renamed or removed);
+`recant cost --json` carries the three lead lines as `summary`. Errors are one line on stderr: exit 1 or 2 is a
+problem with the input or the setup (the line says what to change), exit 3 a fault in Recant itself (`RECANT_DEBUG=1`
+shows the traceback).
 
 ## The cost saver
 
-- `recant.wrap(anthropic_client, store=..., tenant=..., job="agent")` — `Anthropic` or `AsyncAnthropic`; the same
+- `recant.wrap(anthropic_client, store=None, tenant=None, job="agent")` — store default `$RECANT_HOME` or
+  `./.recant`, tenant default "default"; `Anthropic` or `AsyncAnthropic`; the same
   `messages.create`, `create(stream=True)`, `messages.stream(...)` and `messages.count_tokens`; meters every call
   (a stream from its final message's usage; thinking tokens as reasoning), carries out the applied safe levers on each
   request, checks the request differs only in cache markers (else sends the host's own). `with client.run("agent",
@@ -29,7 +63,12 @@ the reference client use.
   session=, system=, messages=, tools=, max_tokens=)` per model call, `tool(...)` per tool call, `close()`.
 - `recant.levers.apply(request_dict, recant.costshape.overlay(layout, tenant))` — the safe levers on an
   Anthropic-shaped request; `recant.levers.declare_host(layout, tenant)` once, so the advisor applies them.
-- `recant cost --store DIR --tenant T [--since 7d] [--nightly] [--all] [--revert ID] [--prices FILE] [--json]` — the
+- `recant apply [--dry-run] [--json]` — turn on the safe levers that are ready (a job needs 20 runs); `--dry-run`
+  shows what each would change in a request.
+- `recant doctor [--json]` — version, SDK, store, switch, metering, prices and coverage, checked; exits 1 if any
+  needs fixing.
+- Every command takes `--store DIR --tenant T` (defaults as for `recant.wrap`).
+- `recant cost [--since 7d] [--nightly] [--all] [--revert ID] [--prices FILE] [--json]` — the
   report; with `--nightly`, apply what is eligible and check what was applied (realized against predicted, after 50
   runs or 7 days).
 - `--prices FILE` (cost, bench, coverage): JSON keyed by model ID, each row in USD per million tokens: `input`,
@@ -66,12 +105,12 @@ the reference client use.
   report at another table; frozen are the levers' shares, the dollars on both sides are at the report's prices.
 - `recant eval memory --sessions S --make-questions` then `--questions Q [--arms none,history,notes,memory_v2]` —
   memory on your own sessions; questions frozen by hash; mechanical scoring from the `ANSWER:` line (every word of the
-  key, or the same date or amount; keep keys minimal). `--model` (default `claude-sonnet-5-5`) drafts, writes and
+  key, single letters and digits as whole words, or the same date or amount; keep keys minimal). `--model` (default `claude-sonnet-5-5`) drafts, writes and
   answers in every arm.
-- `recant feedback [--store DIR --tenant T]` — the six-question form and a numbers-only bundle (the store's coverage
+- `recant feedback` — the six-question form and a numbers-only bundle (the store's coverage
   by provider and public model included); every string Recant writes passes an allow-list, the form's answers go in as
   typed, shown first; nothing is sent. The friction log is `~/.recant/friction.jsonl` (or `$RECANT_HOME`).
-- `recant off [--meter] | on | status --store DIR` (or `RECANT=off|meter|on`, which overrides the store's file) — the
+- `recant off [--meter] | on | status` (or `RECANT=off|meter|on`, which overrides the store's file) — the
   switch, read on every call.
 - `recant --version` — version and the commit it was built from (a PyPI release names it, 0.3.3 on); every report
   and bundle header carries them.
@@ -105,6 +144,8 @@ the reference client use.
 ## Files
 
 - CHANGELOG.md — each version's changes, and the measurements behind the README's numbers and the defaults.
+- AGENTS.md — the recipe for a coding agent, and how to run the tests.
+- skills/recant/SKILL.md — a Claude Code skill: add Recant to an app and report what it would save.
 - README.md — what it is, install, three quickstarts, what leaves the host, what Recant can't see, known limits, the
   client protocol, the formats.
 - examples/cost_quickstart.py — a raw-SDK agent with no caching, wrapped; the `recant cost` sequence in its docstring.

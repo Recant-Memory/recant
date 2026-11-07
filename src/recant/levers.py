@@ -46,7 +46,7 @@ def declare_host(layout, tenant: str, job: str = "agent", run_job: Optional[str]
         old = json.loads(p.read_text()) if p.exists() else {}
         jobs = list(dict.fromkeys([*(old.get("agent_jobs") or []), job]))
         runs = list(dict.fromkeys([*(old.get("agent_run_jobs") or []), run_job or job]))
-        host = {"agent_jobs": jobs, "agent_run_jobs": runs, "carries_out": list(CARRIES_OUT), "label": "wrapped host"}
+        host = {"agent_jobs": jobs, "agent_run_jobs": runs, "carries_out": list(CARRIES_OUT), "label": "your wrapped clients"}
         if old != host:                                   # written whole and renamed: no reader sees half a file
             tmp = p.with_name(f".host.json.{os.getpid()}.{threading.get_ident()}")
             tmp.write_text(json.dumps(host, indent=1) + "\n")
@@ -88,12 +88,16 @@ def _mark(block: dict, ttl: Optional[str]) -> dict:
     return out
 
 
-def apply(params: dict, overlay: dict, *, default_ttl: str = "5m") -> dict:
+def apply(params: dict, overlay: dict, *, default_ttl: str = "5m", job: Optional[str] = None) -> dict:
     """The request with the overlay's safe levers carried out; the input is left untouched. With no applied lever in the
-    overlay the request comes back as a deep copy of itself."""
+    overlay the request comes back as a deep copy of itself. `job`: the job the call is made under; a breakpoint applied
+    to some jobs only (its action's `jobs`, where it pays) is not carried out on another job's call."""
     out = copy.deepcopy(params)
     applied = {k for k, v in (overlay or {}).items() if isinstance(v, dict) and v.get("kind") == "applied"}
     if "breakpoint.add" not in applied:
+        return out
+    only = ((overlay.get("breakpoint.add") or {}).get("action") or {}).get("jobs")
+    if only and job is not None and job not in only:
         return out
     ttl = default_ttl
     if "ttl.prefix" in applied:

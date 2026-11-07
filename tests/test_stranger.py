@@ -55,7 +55,7 @@ def chat(client, runs: int, calls: int = 3):
             msgs = []
             for k in range(calls):
                 msgs.append({"role": "user", "content": f"turn {k} of run {i}, some words to carry " * 20})
-                client.messages.create(model="claude-sonnet-5", max_tokens=50, system="You are terse. " * 30, messages=list(msgs))
+                client.messages.create(model="claude-sonnet-5", max_tokens=50, system="You are terse. " * 400, messages=list(msgs))   # past the 1,024-token cache minimum
                 msgs.append({"role": "assistant", "content": "ok"})
 
 

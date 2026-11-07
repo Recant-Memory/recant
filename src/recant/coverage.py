@@ -349,8 +349,10 @@ def line(s: Optional[dict], *, watched: bool = True) -> str:
     if s is None or (not s["calls_seen"] and not s["calls_unseen"]):
         return "coverage: no model calls in this window"
     if not s["calls_unseen"]:
-        return (f"coverage: Recant saw all {s['calls_seen']:,} model calls the watch could see in this process"
-                if watched else "coverage: not measured (the watch was not on); calls outside Recant are not visible")
+        return (f"coverage: Recant saw all {s['calls_seen']:,} model calls; its coverage watch found none going around it "
+                "in the wrapped processes" if watched else
+                "coverage: not measured yet: no wrapped process has written its coverage count (it does when a run "
+                "closes, and at exit); calls made around Recant are not visible until then")
     seen = pct(s["share_calls"])
     cost = f", {pct(s['share_usd'])} of list-priced cost" if s.get("share_usd") is not None else ""
     shown = "; ".join(_where(u) for u in s["unseen"][:3]) + ("; …" if len(s["unseen"]) > 3 else "")
@@ -497,9 +499,14 @@ def render_reconcile(r: dict) -> str:
         by = {m["model"]: m for m in r["by_model"]}
         left = [f"{m} ({by[m]['tokens']:,} tokens, {pct(by[m]['share_tokens'])} seen)" if m in by and by[m].get("share_tokens") is not None
                 else m for m in r["unpriced_models"]]
-        cost = (f", {pct(r['share_usd'])} of the list-priced cost (${r['usd_seen']:,.2f} of ${r['usd_list_priced']:,.2f}"
-                + (f"; unpriced, so left out of the cost share: {', '.join(left)}" if left else "") + ")") \
-            if r.get("share_usd") is not None else ""
+        unseen_unpriced = [m for m in r["unpriced_models"] if m in by and (by[m].get("share_tokens") or 0) < 1]
+        if unseen_unpriced:                          # a cost share that leaves unseen traffic out would read 100%
+            cost = (f"; the cost share is not known: tokens went unseen on models with no price ({', '.join(left)}); "
+                    "pass --prices with a row for each to count them")
+        else:
+            cost = (f", {pct(r['share_usd'])} of the list-priced cost (${r['usd_seen']:,.2f} of ${r['usd_list_priced']:,.2f}"
+                    + (f"; unpriced, so left out of the cost share: {', '.join(left)}" if left else "") + ")") \
+                if r.get("share_usd") is not None else ""
         out.append(f"Recant saw {pct(r['share_tokens'])} of the tokens ({r['tokens_seen']:,} of {r['tokens']:,}){cost}")
     out.append("by model (runs reported; calls Recant metered on those days; tokens; share seen; list-priced):")
     for m in r["by_model"]:

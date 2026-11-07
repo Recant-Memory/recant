@@ -30,8 +30,7 @@ def test_the_friction_log_counts_help_failures_retries_and_config_changes(tmp_pa
         main(["--help"])
     with pytest.raises(SystemExit):
         main(["bench"])                                                   # no --tasks: a usage error
-    with pytest.raises(Exception):
-        main(["cost", "--store", str(tmp_path / "nowhere"), "--tenant", "bad tenant!"])
+    assert main(["cost", "--store", str(tmp_path / "nowhere"), "--tenant", "bad tenant!"]) == 2   # one line, still a failure
     main(["off", "--store", str(tmp_path / "s")])
     main(["cost", "--store", str(tmp_path / "s2"), "--tenant", "00000000-0000-0000-0000-000000000001"])
     s = friction.summary()
@@ -87,3 +86,13 @@ def test_what_the_allow_list_left_out_is_said_by_where_never_by_what():
     assert out == {"header": {"model": None}, "levers": [{"id": None}]}
     assert dropped == ["header.model", "header.<key>", "levers[0].id"]
     assert "house-model" not in json.dumps(dropped) and "customer" not in json.dumps(dropped)
+
+
+def test_the_form_with_no_input_left_reads_blank_answers_and_writes_nothing(tmp_path):
+    from recant import feedback as fb_
+
+    def closed(prompt):
+        raise EOFError
+    said = []
+    assert fb_.run(bench_dirs=[], eval_dirs=[], out_dir=tmp_path, ask=closed, say=said.append) is None
+    assert "Nothing written." in said and not list(tmp_path.iterdir())

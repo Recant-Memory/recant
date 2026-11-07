@@ -205,12 +205,12 @@ def test_the_async_streaming_quickstart_meters_concurrent_tasks_and_carries_the_
     api, store = API(), str(layout.root)
     mod.main([store, "--tasks", "3", "--parallel", "3"], sdk=sdk(api, aio=True))
     assert len(api.bodies) == 18 and all(b["stream"] for b in api.bodies) and "cache_control" not in json.dumps(api.bodies)
-    d = layout.costshape_dir("demo")
+    d = layout.costshape_dir("default")
     (d / "overlay.json").write_text(json.dumps({"breakpoint.add": {"kind": "applied", "action": {}}}))
     mod.main([store, "--tasks", "2", "--parallel", "2"], sdk=sdk(api, aio=True))
     later = api.bodies[18:]
     assert len(later) == 12 and all(b["system"][-1]["cache_control"] and b["messages"][-1]["content"][-1]["cache_control"] for b in later)
-    files = sorted(layout.log_dir("demo").glob("*.jsonl"))
+    files = sorted(layout.log_dir("default").glob("*.jsonl"))
     calls = [r for p in files for r in read_run(p, typed=False) if r["kind"] == "model_call"]
     assert len(files) == 5 and len(calls) == 30 and {r["session"] for r in calls} == {f"task-{i}" for i in range(5)}
     assert all(r["usage"] == WANT for r in calls)

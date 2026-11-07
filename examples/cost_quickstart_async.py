@@ -4,11 +4,12 @@ flight at once. The only Recant line is the wrap; each task is its own run (`asy
 concurrent tasks keep their own logs, and the levers Recant applies are carried out on every streamed request.
 
     pip install "recant[anthropic]"
-    ANTHROPIC_API_KEY=... python examples/cost_quickstart_async.py STORE_DIR --tasks 30    # shadow
-    recant cost --store STORE_DIR --tenant demo --nightly                                   # apply what is safe and pays
-    ANTHROPIC_API_KEY=... python examples/cost_quickstart_async.py STORE_DIR --tasks 50    # the same code, levers carried out
-    recant cost --store STORE_DIR --tenant demo --nightly                                   # check: realized against predicted
-    recant cost --store STORE_DIR --tenant demo"""
+    ANTHROPIC_API_KEY=... python examples/cost_quickstart_async.py --tasks 30    # nothing applied yet; store ./.recant
+    recant cost                                                                 # spent, can save, measured on
+    recant apply                                                                # turn the safe savings on
+    ANTHROPIC_API_KEY=... python examples/cost_quickstart_async.py --tasks 50    # the same code, levers carried out
+    recant cost --nightly                                                       # check: realized against predicted
+    recant cost"""
 from __future__ import annotations
 
 import argparse
@@ -60,15 +61,15 @@ async def run(client, start: int, n: int, *, parallel: int, mark: Path) -> None:
 
 def main(argv=None, sdk=None) -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("store")
+    ap.add_argument("store", nargs="?", help="the store; default Recant's own ($RECANT_HOME or ./.recant)")
     ap.add_argument("--tasks", type=int, default=30)
     ap.add_argument("--parallel", type=int, default=5, help="tasks in flight at once")
     a = ap.parse_args(argv)
     if sdk is None:
         import anthropic
         sdk = anthropic.AsyncAnthropic(timeout=anthropic.Timeout(120.0, connect=10.0))   # your own idle timeout: the SDK's 600 s does not cut a stream that goes silent
-    client = recant.wrap(sdk, store=a.store, tenant=TENANT)              # the one line
-    mark = Path(a.store) / "cost_quickstart.next"
+    client = recant.wrap(sdk, store=a.store)              # the one line
+    mark = client.layout.root / "cost_quickstart.next"
     start = int(mark.read_text()) if mark.exists() else 0
     asyncio.run(run(client, start, a.tasks, parallel=a.parallel, mark=mark))
     print(f"{a.tasks} tasks run; levers carried out on the last call: {client.last_sent_markers or 'none'}")

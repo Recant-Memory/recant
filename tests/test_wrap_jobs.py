@@ -53,10 +53,16 @@ def test_the_report_names_the_jobs_a_share_is_of_and_says_its_weekly_scale(layou
     two_agents(client, n=4)
     host = json.loads((layout.costshape_dir(TENANT) / "host.json").read_text())
     rep = cs.report(layout, TENANT, cs.HostShape(**{k: tuple(v) if isinstance(v, list) else v for k, v in host.items()}), since="7d")
-    text = rep.text(cs.advise(rep), [])
-    assert "UTC (7.0 days)" in text.splitlines()[0]
-    assert "over this whole 7.0-day window that is ×1.00" in text and "of job researcher's bill)" in text
+    levers = cs.advise(rep)
+    text = rep.text(levers, [])
+    head = text.splitlines()[0]
+    assert "UTC (7.0 days)" in head and "; traffic in it from " in head      # minutes of traffic, said as such
+    assert "what each lever would have saved on the calls it is priced on, as measured" in text
+    assert "/wk" not in text and "of job researcher's bill)" in text   # under a day: dollars measured, no weekly rate
     assert "of agent)" not in text
+    rep.calls[0]["start"] -= 2 * 86400                                 # the same traffic spread over two days
+    text = rep.text(levers, [])
+    assert "over this whole 7.0-day window that is ×1.00" in text and "/wk" in text
 
 
 def test_a_relative_store_is_where_it_was_when_wrapped(tmp_path, monkeypatch):

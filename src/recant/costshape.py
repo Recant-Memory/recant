@@ -70,6 +70,29 @@ def _prompt(c) -> int:
 # consumer's table overrides it row by row. Rows from the vendor's price page (platform.claude.com, pricing), read
 # 2026-11-05: cache reads are 0.05x input on Opus 5.5 and Sonnet 5.5, 0.025x on Fable 5.1, 0.1x elsewhere; 5-minute
 # writes 1.25x, 1-hour writes 2x; batch half price. Haiku 5.5 has two cards, split at a 100,000-token prompt.
+# The shortest prefix the API caches, by model: a shorter one is sent with its marker and silently not cached (no write,
+# no read). From the vendor's prompt-caching documentation, read 2026-11-06, which says to check the values before
+# relying on them. A model not listed is taken at 4,096, the longest minimum listed, so a saving is never sized on a
+# prefix that may not cache.
+CACHE_MIN_TOKENS_AS_OF = date(2026, 11, 6)
+CACHE_MIN_TOKENS: dict[str, int] = {
+    **{m: 512 for m in ("claude-opus-5-5", "claude-opus-5", "claude-fable-5", "claude-mythos-5", "claude-fable-5-1",
+                        "claude-mythos-5-1", "claude-sonnet-5-5", "claude-haiku-5-5")},
+    **{m: 1024 for m in ("claude-opus-4-8", "claude-sonnet-5", "claude-sonnet-4-6", "claude-sonnet-4-5", "claude-opus-4-1",
+                         "claude-opus-4", "claude-sonnet-4")},
+    **{m: 2048 for m in ("claude-opus-4-7", "claude-3-5-haiku")},
+    **{m: 4096 for m in ("claude-opus-4-6", "claude-opus-4-5", "claude-haiku-4-5")},
+}
+
+
+def cache_min(model: str) -> int:
+    """The shortest cacheable prefix for `model` (a dated snapshot or alias suffix allowed), else 4,096."""
+    for m in sorted(CACHE_MIN_TOKENS, key=len, reverse=True):
+        if model == m or model.startswith(m + "-") or model.startswith(m + "@"):
+            return CACHE_MIN_TOKENS[m]
+    return max(CACHE_MIN_TOKENS.values())
+
+
 LIST_PRICES: dict[str, Profile] = {
     "claude-opus-5-5": Profile(p=4 * M, po=20 * M, w=1.25, r=0.05, w_long=2.0, batch=0.5),
     "claude-fable-5-1": Profile(p=10 * M, po=50 * M, w=1.25, r=0.025, w_long=2.0, batch=0.5),
@@ -561,11 +584,30 @@ class Lever:
     action: dict = field(default_factory=dict)
     note: str = ""
 
-    def line(self, agent: str = "agent") -> str:
-        usd = f"${self.saves_usd:,.2f}/wk" if self.saves_usd is not None else "unpriced"
-        whose = agent if self.job == "agent" else f"job {self.job}"
+    def line(self, agent: str = "agent", scale: Optional[float] = None) -> str:
+        """`scale`: the factor the lever's weekly figures were scaled by; given, the line shows the dollars measured
+        instead (the report does this while the traffic spans under a day)."""
+        unit, k = ("", scale) if scale else ("/wk", 1.0)
+        usd = f"{_usd(self.saves_usd / k)}{unit}" if self.saves_usd is not None else "unpriced"
+        only = (self.action or {}).get("jobs") if isinstance(self.action, dict) else None
+        whose = ("job " if len(only) == 1 else "jobs ") + " + ".join(only) if only else \
+            (agent if self.job == "agent" else f"job {self.job}")
         sh = f" ({-self.share:+.1%} of {whose}'s bill)" if self.share is not None else ""
-        return f"{self.state:15} {self.id:28} {usd:>12}{sh}  {self.note}"
+        split = self.evidence.get("by_job") if isinstance(self.evidence, dict) else None
+        parts = (" [" + ", ".join(f"{j} {_usd(v / k)}{unit}" for j, v in split.items()) + "]") if split and len(split) > 1 else ""
+        return f"{self.state:15} {self.id:28} {usd:>12}{sh}{parts}  {self.note}"
+
+
+def traffic_span(calls: list) -> float:
+    """Seconds from the first request to the last reply: the one span the report's header, its table and its lead use."""
+    if not calls:
+        return 0.0
+    return max(c["start"] + (c.get("latency") or 0) for c in calls) - min(c["start"] for c in calls)
+
+
+def _usd(v: float) -> str:
+    """Dollars to the cent, with no negative zero: "$-0.00" reads as a loss that is not there."""
+    return "$0.00" if abs(v) < 0.005 else f"${v:,.2f}"
 
 
 @dataclass
@@ -660,11 +702,21 @@ class Report:
         costs, measured), health (loops, failures, retries, unmetered spend, unexpected traffic). Each item is
         labelled automatic, opt-in or pointed out; a section with nothing to say says so."""
         days = (self.until - self.since) / 86400
-        out = [f"recant cost: {self.host.label}, {datetime.fromtimestamp(self.since, timezone.utc):%m-%d} to "
-               f"{datetime.fromtimestamp(self.until, timezone.utc):%m-%d} UTC ({days:.1f} days)"]
+        basis = self.calls or list(self.failed)             # the lead's span: the failed calls when none succeeded
+        starts = [c["start"] for c in basis]
+        ends = [c["start"] + (c.get("latency") or 0) for c in basis]           # to the last reply, not the last request
+        span = traffic_span(basis)
+        short = bool(starts) and span < 86400              # under a day of traffic: dollars as measured, no weekly rate
+        out = [f"recant cost: {self.host.label}, the window {datetime.fromtimestamp(self.since, timezone.utc):%m-%d} to "
+               f"{datetime.fromtimestamp(self.until, timezone.utc):%m-%d} UTC ({days:.1f} days)"
+               + (f"; traffic in it from {datetime.fromtimestamp(min(starts), timezone.utc):%m-%d %H:%M} to "
+                  f"{datetime.fromtimestamp(max(ends), timezone.utc):%H:%M} UTC ({_period(span)})" if starts else "")]
         from . import coverage as cov
-        out.append(cov.line(self.coverage(), watched=self.watched))
         levers = levers or []
+        led = ledger or []
+        ready = {lv.id for lv in levers if eligible(self, lv, ledger_=led)[0]}
+        out[1:1] = lead(self, levers, ready)             # the three lines first, before the detail
+        out.append(cov.line(self.coverage(), watched=self.watched))
         by = {sec: [lv for lv in levers if section_of(lv) == sec] for sec in ("cost", "quality", "health")}
 
         has_default = any(c["job"] == "agent" for c in self.calls)          # the default job named when it has calls
@@ -672,16 +724,19 @@ class Report:
         agent = "job " + jobs[0] if len(jobs) == 1 else "jobs " + " + ".join(jobs)
 
         def items(ls):
-            return ["  " + f"{label_of(lv):12} " + lv.line(agent) for lv in ls]
+            return ["  " + f"{label_of(lv):12} " + lv.line(agent, scale=self.restrict(lv.job).per_week if short else None)
+                    for lv in ls]
         out.append("\n== cost ==")
         out.append(render(self.shape, title=self.host.label))
         leaks = [lv for lv in by["cost"] if lv.kind == "fix_cause"]
         out.append("leaks found:" if leaks else "leaks found: none")
         out += items(leaks)
         rest = [lv for lv in by["cost"] if lv.kind != "fix_cause"]
-        out.append(f"levers ($/wk: each lever's saving on the calls it is priced on, scaled to a week; over this whole "
-                   f"{days:.1f}-day window that is \u00d7{self.per_week:.2f}, and a lever priced from a later settings change is "
-                   f"scaled from that shorter span, a span under a day counted as a day):" if rest else
+        out.append(("levers ($: what each lever would have saved on the calls it is priced on, as measured; a weekly "
+                    "rate once the traffic spans a day):" if short else
+                    f"levers ($/wk: each lever's saving on the calls it is priced on, scaled to a week; over this whole "
+                    f"{days:.1f}-day window that is \u00d7{self.per_week:.2f}, and a lever priced from a later settings change is "
+                    f"scaled from that shorter span, a span under a day counted as a day):") if rest else
                    "levers: none sized in this window")
         out += items(sorted(rest, key=lambda lv: ({"automatic": 0, "opt-in": 1}.get(label_of(lv), 2), -(lv.saves_usd or 0))))
         checks = [e for e in (ledger or []) if e.get("event") == "checked"]
@@ -774,6 +829,9 @@ def _pct(xs: list, q: float) -> Optional[float]:
     return xs[min(len(xs) - 1, max(0, math.ceil(q * len(xs)) - 1))] if xs else None
 
 
+SLOW_CALL_S = 30.0                       # a call this long is named on the latency line, however few there are
+
+
 def latency(calls: list, background: Optional[list] = None) -> dict:
     """Seconds: end-to-end per call and per task (a run's first request to its last reply), p50 and p95; time to
     first token on streamed calls; the metering wrapper's own time per call (network excluded); the write path —
@@ -785,7 +843,11 @@ def latency(calls: list, background: Optional[list] = None) -> dict:
         tasks[(c["run"], c.get("session"))] = (min(t0, c["start"]), max(t1, end))
     q = lambda xs: {"p50": _pct(xs, 0.5), "p95": _pct(xs, 0.95), "n": sum(x is not None for x in xs)}   # noqa: E731
     bg = [b for b in (background or []) if b.get("end") is not None]
-    return {"call": q([c.get("latency") for c in calls]), "task": q([t1 - t0 for t0, t1 in tasks.values()]),
+    slow = [c for c in calls if (c.get("latency") or 0) > SLOW_CALL_S]
+    call = q([c.get("latency") for c in calls])
+    call.update(slow=len(slow), longest=max((c["latency"] for c in slow), default=None),   # a tail p95 can hide: a stall,
+                slow_ttft=max((c.get("ttft") or 0 for c in slow), default=None))           # or the SDK retrying inside
+    return {"call": call, "task": q([t1 - t0 for t0, t1 in tasks.values()]),
             "ttft": q([c.get("ttft") for c in calls]), "overhead": q([c.get("overhead") for c in calls]),
             "write_path": {"on_request_path": False, **q([b["end"] - b["start"] for b in bg])}}
 
@@ -796,7 +858,11 @@ def render_latency(lat: dict) -> list[str]:
             return "not measured"
         return f"p50 {d['p50'] * scale:,.2f} {unit}, p95 {d['p95'] * scale:,.2f} {unit} ({d['n']})"
     wp = lat["write_path"]
-    return [f"per call: {f(lat['call'])}; per run (one run(...) block): {f(lat['task'])}",
+    c = lat["call"]
+    slow = (f"; {c['slow']} calls over {SLOW_CALL_S:.0f} s, the longest {c['longest']:,.0f} s"
+            + (f" with its first token at {c['slow_ttft']:,.0f} s (a stall, or a retry the SDK made inside the call)"
+               if c.get("slow_ttft") and c["slow_ttft"] > SLOW_CALL_S / 2 else "") if c.get("slow") else "")
+    return [f"per call: {f(lat['call'])}{slow}; per run (one run(...) block, or one conversation outside any): {f(lat['task'])}",
             f"time to first token (streamed calls): {f(lat['ttft'])}",
             f"Recant's own time per call (network excluded): {f(lat['overhead'], 1000, 'ms')}",
             "write path: " + (f"{f(wp)}, off the request's path" if wp["n"] else "none in this window")]
@@ -814,6 +880,93 @@ def section_of(lv) -> str:
     if lv.id.startswith(HEALTH):
         return "health"
     return "cost"
+
+
+LEAD_MIN_CALLS = 20        # below this a first report says it is too early, and sizes nothing
+
+
+def _period(seconds: float) -> str:
+    if seconds < 90:
+        k = max(1, round(seconds))
+        return f"{k} second{'s' if k != 1 else ''}"
+    if seconds < 5400:
+        return f"{round(seconds / 60)} minutes"
+    if seconds < 2 * 86400:
+        return f"{seconds / 3600:.1f} hours"
+    return f"{seconds / 86400:.1f} days"
+
+
+CHANGES = {                # what each safe lever does to a request, for `recant apply --dry-run`
+    "breakpoint.add": ("adds a cache breakpoint (cache_control) on the system prompt's last block and on the last "
+                       "message's last block; a plain-string system prompt or message becomes a one-block list holding the "
+                       "same text. Nothing else in the request changes: the model is sent the same input"),
+    "ttl.prefix": "sets the system prompt's cache breakpoint to the 1-hour lifetime (ttl 1h); nothing else changes",
+}
+
+
+def lead(rep: "Report", levers: list, ready: Optional[set] = None) -> list[str]:
+    """The report's first three lines: what was spent, what the safe levers would save of it with no change to what the
+    model sees, and what that rests on. In dollars on the calls measured; a weekly rate only once the traffic spans a
+    day. Below LEAD_MIN_CALLS it says it is too early and sizes nothing."""
+    calls = rep.calls
+    n = len(calls)
+    bad = list(getattr(rep, "failed", []) or [])         # failed calls are billed for the usage they reported
+    if not n and not bad:
+        return ["No calls metered in this window: wrap your client with recant.wrap(client) and run your app."]
+    span = traffic_span(calls) if calls else traffic_span(bad)   # the header's and the table's span: the calls that
+                                                                    # succeeded (all of them, failed, when none did)
+    period = _period(span)
+    priced = [c for c in calls if c["model"] in rep.profiles]
+    bill = sum(rep.cost(c) for c in priced)
+    bad_bill = sum(rep.cost(c) for c in bad if c["model"] in rep.profiles)
+    bad_tokens = sum(c["uncached"] + c["cache_read"] + c["cache_write"] + c["output"] for c in bad)
+    unpriced = n - len(priced)
+    if not n:
+        return [f"You spent ${bad_bill:,.2f} on {len(bad)} calls over {period}, and every one of them failed: see the "
+                "health line below.",
+                "Recant sizes savings on calls that succeeded; there are none in this window yet.",
+                f"Measured on {len(bad)} failed calls; nothing is estimated."]
+    out = [f"You spent ${bill + bad_bill:,.2f} on {n + len(bad)} calls over {period}"
+           + (f" ({unpriced} more on models with no price, counted in tokens only)" if unpriced else "")
+           + ((f", {'under $0.01' if bad_bill < 0.005 else f'${bad_bill:,.2f}'} of it on {len(bad)} that failed (on the "
+               "health line)" if bad_bill > 0 else
+               f", {len(bad)} of them failed, with {bad_tokens:,} tokens of usage on models with no price (on the "
+               "health line)" if bad_tokens else
+               f", {len(bad)} of them failed with no usage reported (on the health line)") if bad else "") + "."]
+    if n < LEAD_MIN_CALLS:
+        out.append(f"Too little traffic to size a saving yet: {n} calls metered, and Recant needs about {LEAD_MIN_CALLS}. "
+                   "Run your app as usual and ask again.")
+        out.append(f"Measured on {n} calls; nothing is estimated until there are more.")
+        return out
+    safe = [lv for lv in levers if label_of(lv) == "automatic" and lv.state == "available" and (lv.share or 0) > 0]   # a share
+                                                                       # is the part of its job's bill the lever saves
+    ready = {lv.id for lv in safe} if ready is None else ready
+    on = [lv for lv in levers if label_of(lv) == "automatic" and lv.state == "applied"]
+    if safe:
+        save = 0.0
+        for lv in safe:                       # a share is of its jobs' bill since the jobs' last setting change
+            r = rep.restrict(lv.job)
+            save += lv.share * r.job_bill(lever_jobs(r, lv.job, lv.action))
+        weekly = sum(lv.saves_usd or 0.0 for lv in safe)   # the levers table's own weekly figures
+        runs = min(evidence(rep, lever_jobs(rep, lv.job, lv.action)) for lv in safe)
+        then = ("Run `recant apply`." if any(lv.id in ready for lv in safe) else
+                f"`recant apply` turns it on once the job has {MIN_RUNS} runs ({runs} so far).")
+        line = (f"Recant can save about ${save:,.2f} of that ({save / (bill + bad_bill):.0%}) with no change to what the model sees: "
+                f"{', '.join(lv.id for lv in safe)}. {then}" if bill else
+                f"Recant has safe savings to apply ({', '.join(lv.id for lv in safe)}). {then}")
+        if span >= 86400 and weekly and bill:
+            line += f" At this rate that is about ${weekly:,.2f} a week."
+        out.append(line)
+    elif on:
+        out.append(f"The safe savings are on ({', '.join(lv.id for lv in on)}): `recant cost` checks each against its "
+                   "prediction below, once it has 50 runs or 7 days.")
+    else:
+        out.append("Recant finds no safe saving to apply on this traffic; the levers below that change what the model sees "
+                   "need evidence first (`recant bench`).")
+    out.append(f"Measured on {n} calls over {period}{' (the ones that succeeded)' if bad else ''}; the estimate firms up "
+               "with more traffic."
+               + (" A saving is sized from each job's last setting change on." if any(rep.restrict(lv.job) is not rep for lv in safe) else ""))
+    return out
 
 
 def label_of(lv) -> str:
@@ -913,6 +1066,9 @@ def load(layout, tenant: str, host: HostShape, *, since=None, until=None) -> tup
                     folds.append({**f, "log_run": start["run"], "remaining": max(0, (r.get("rounds") or 0) - (f.get("at_round") or 0))})
         else:
             continue
+        if job == "host":                                 # recant.wrap's run for calls outside any client.run
+            for x in c:
+                x["host_run"] = True
         calls += c
         meta.update(m)
     changes += _fingerprint_changes(calls)
@@ -1087,28 +1243,42 @@ def lever_breakpoint_add(rep: Report) -> Optional[Lever]:
     head = _shared_head([c for g in groups for c in g], [g[0] for g in groups], ttl)
     save = cost = tokens = 0.0
     seen = 0
+    net_by_job: dict = {}                    # the net saving per job, so a host with two agents sees each one's part
     for cs_ in groups:
-        prev_x = 0
+        prev_x = 0                                   # the previous call's prefix, as written to the cache (0: not)
         for i, c in enumerate(cs_):
             pf = rep.profiles.get(c["model"])
             if pf is None:
                 continue
             x = c["uncached"] + c["cache_read"] + c["cache_write"]
             pf = pf.at(x)
-            reused = prev_x if c.get("extends_previous") else (min(x, head.get(id(c), 0)) if i == 0 else 0)
-            save += pf.p * (1 - pf.r) * reused
-            cost += pf.p * (pf.w - 1) * max(0, x - reused)
+            small = x < cache_min(c["model"])        # under the model's minimum: the marker caches nothing
+            reused = 0 if small else (prev_x if c.get("extends_previous") else
+                                      (min(x, head.get(id(c), 0)) if i == 0 else 0))
+            if reused and reused < cache_min(c["model"]):
+                reused = 0
+            gain, premium = pf.p * (1 - pf.r) * reused, 0 if small else pf.p * (pf.w - 1) * max(0, x - reused)
+            save += gain
+            cost += premium
+            net_by_job[c["job"]] = net_by_job.get(c["job"], 0.0) + gain - premium
             tokens += reused
             seen += 1
-            prev_x = x
+            prev_x = 0 if small else x
     if not seen:
         return None
     bill = rep.job_bill(_agent(rep))
+    pays = sorted(j for j, v in net_by_job.items() if v > 0)
     net = save - cost
+    action = {"cache": "moving breakpoint on the last message, the system block cached"}
+    if pays and len(pays) < len(net_by_job):          # a job where the write premium is more than the reads: left out
+        net = sum(net_by_job[j] for j in pays)
+        action["jobs"] = pays
+        bill = rep.job_bill(set(pays))                # its share is of the bill of the jobs it is applied to
     return Lever("breakpoint.add", "applied", "agent", tokens * rep.per_week, net * rep.per_week, net / bill if bill else None, True,
-                 action={"cache": "moving breakpoint on the last message, the system block cached"},
+                 action=action,
                  evidence={"calls": seen, "reused_tokens": tokens, "first_calls_warm": len(head), "save": round(save, 4),
-                           "write_premium": round(cost, 4)},
+                           "write_premium": round(cost, 4),
+                           "by_job": {j: round(v * rep.per_week, 4) for j, v in sorted(net_by_job.items())}},
                  note=f"no cache breakpoints on {seen} calls whose requests only append")
 
 
@@ -1373,7 +1543,11 @@ def detect_output_cap(rep: Report) -> list[Lever]:
                              None, False, state="finding", evidence={"stopped": len(hit), "calls": len(cs), "p999_output": p999},
                              note=(f"{len(hit)} of {len(cs)} {'call' if len(cs) == 1 else 'calls'} stopped at the output "
                                    f"cap: {'its' if len(hit) == 1 else 'their'} output was cut short, so the cap is below what "
-                                   "the answers need: raise it")))
+                                   "the answers need: raise it"
+                                   + (f"; {think:.0%} of the job's output was thinking, which counts against the cap (some "
+                                      "models think unless the request turns it off: README, \"Thinking you didn't ask "
+                                      "for\")" if (think := sum(c.get("reasoning") or 0 for c in cs) /
+                                                   max(1, sum(c["output"] for c in cs))) >= 0.2 else ""))))
     return out
 
 
@@ -1552,6 +1726,23 @@ def _shape_sig(rep: Report, job: str) -> str:
     return f"n{n.bit_length()}:x{int(x).bit_length()}"              # coarse: a shape change moves a bucket
 
 
+def lever_jobs(rep: "Report", job: str, action: Optional[dict] = None) -> set:
+    """The jobs a lever is sized, applied, predicted and checked on: its action's `jobs` when it is applied to some
+    only (a breakpoint left off a job where it would cost), else the agent jobs for "agent", else its own job."""
+    only = (action or {}).get("jobs")
+    if only:
+        return set(only)
+    return _agent(rep) if job == "agent" else {job}
+
+
+def evidence(rep: Report, jobs: set) -> int:
+    """How much traffic a lever of the agent jobs rests on: each run the host opened, plus each call made outside any run
+    (recant.wrap with no client.run keeps one run per client open for the life of the process, so its calls, not that
+    one run, are the units of evidence)."""
+    return len([r for r in rep.runs(jobs) if not r.calls[0].get("host_run")]) + \
+        sum(1 for c in rep.calls if c["job"] in jobs and c.get("host_run"))
+
+
 def eligible(rep: Report, lv: Lever, *, ledger_: Optional[list] = None, min_runs: int = MIN_RUNS) -> tuple[bool, str]:
     if not lv.safe or lv.kind != "applied" or lv.state != "available":
         return False, "not a safe lever that is available"
@@ -1560,7 +1751,7 @@ def eligible(rep: Report, lv: Lever, *, ledger_: Optional[list] = None, min_runs
     if lv.share is None or lv.share < FLOOR_SHARE:
         return False, f"saves under {FLOOR_SHARE:.0%} of its job's bill"
     if lv.job == "agent":
-        runs, unit = len(rep.runs(_agent(rep))), "runs"
+        runs, unit = evidence(rep, lever_jobs(rep, lv.job, lv.action)), "runs"   # a call outside any client.run counts as one
     else:                                   # a nightly job runs once a night: 20 runs never fit a 7-day window, so its calls count
         bruns = {b["run"] for b in rep.background if b["job"] == lv.job}
         runs, unit = sum(1 for c in rep.calls if c["run"].split(":")[0] in bruns), "calls"
@@ -1580,7 +1771,7 @@ def apply(layout, tenant: str, rep: Report, lv: Lever, *, log=None, at: Optional
         raise ValueError(f"{lv.id}: {why}")
     at = at or datetime.now(timezone.utc).timestamp()
     ov = overlay(layout, tenant)
-    jobs = _agent(rep) if lv.job == "agent" else {lv.job}
+    jobs = lever_jobs(rep, lv.job, lv.action)
     ov[lv.id] = {"kind": lv.kind, "action": lv.action, "applied_at": at, "predicted_usd": lv.saves_usd,
                  "predicted_tokens": lv.saves_tokens, "predicted_share": lv.share, "job": lv.job,
                  "assumed_calls": round(sum(1 for c in rep.calls if c["job"] in jobs) * rep.per_week)}   # the volume the prediction assumed
@@ -1627,7 +1818,9 @@ def check(lever_id: str, rep: Report, entry: dict) -> dict:
                    rep.folds, rep.shape, rep.profiles, rep.prices_used)
     realized, runs, guard, calls = None, 0, None, 0
     if lever_id == "breakpoint.add":                     # each call as measured, and as it would have cost uncached
-        cs_ = [c for c in after.calls if c["job"] in _agent(after) and c["model"] in after.profiles]
+        only = set((entry.get("action") or {}).get("jobs") or [])        # the jobs it was applied to, when not all
+        cs_ = [c for c in after.calls if c["job"] in _agent(after) and c["model"] in after.profiles
+               and (not only or c["job"] in only)]
         runs, calls = len({(c["run"], c.get("session")) for c in cs_}), len(cs_)
         realized = sum(after.profiles[c["model"]].at(_prompt(c)).p * _prompt(c)            # the card the whole prompt
                        + after.profiles[c["model"]].at(_prompt(c)).po * c["output"] - after.cost(c) for c in cs_)   # pays
@@ -1666,7 +1859,8 @@ def check(lever_id: str, rep: Report, entry: dict) -> dict:
     span = max(1.0, after.until - since)
     predicted = (entry.get("predicted_usd") or 0.0) * span / WEEK
     job = entry.get("job")
-    jobs = _agent(after) if job == "agent" else ({job} if job in after.host.background_jobs else None)
+    jobs = lever_jobs(after, job, entry.get("action")) if job == "agent" else \
+        ({job} if job in after.host.background_jobs else None)
     if entry.get("predicted_share") is not None and jobs and realized is not None:
         # by the work done since, not the clock: the predicted share of what the job's calls in the window would have
         # cost under the old setting (measured plus realized). A week's prediction scaled by elapsed time misreads any
@@ -1715,7 +1909,7 @@ def baseline(layout, tenant: str, host: HostShape, lid: str, entry: dict, *, pri
     if at is None:
         return {}
     pre = report(layout, tenant, host, since=at - WEEK, until=at, prices=prices)
-    jobs = _agent(pre)
+    jobs = lever_jobs(pre, entry.get("job") or "agent", entry.get("action"))
     out = {"assumed_calls": sum(1 for c in pre.calls if c["job"] in jobs)}
     if lid.startswith("memory."):
         part = lid.split(".")[1].split("_")[0]

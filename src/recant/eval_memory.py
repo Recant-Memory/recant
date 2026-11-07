@@ -198,17 +198,17 @@ def _words(s: str) -> list[str]:
 
 
 def trim_key(question: str, key: str) -> str:
-    """A suggested shorter key: the drafted one less the words at its ends that its question already says, and a
-    leading article ("Project Juniper" for "Which project do I manage?" suggests "Juniper"). Only a suggestion, listed for
+    """A suggested shorter key: the drafted one less the leading words its question already says, and a leading
+    article ("Project Juniper" for "Which project do I manage?" suggests "Juniper"). Only a suggestion, listed for
     the developer: a word the question says can still be part of the value ("New York Avenue" for "my New York office
     address"), so no key is changed by it. A key that would be left empty is kept."""
     asked = set(_words(question))
     said = lambda w: bool(set(_words(w))) and set(_words(w)) <= asked          # noqa: E731
     kept = key.split()
-    while kept and (said(kept[0]) or _words(kept[0]) in (["the"], ["a"], ["an"])):   # from the ends only: a word in the
-        kept = kept[1:]                                                              # middle can be part of the value
-    while kept and said(kept[-1]):                                                   # ("10 New York Avenue")
-        kept = kept[:-1]
+    while kept and (said(kept[0]) or _words(kept[0]) in (["the"], ["a"], ["an"])):   # from the start only: a word in the
+        kept = kept[1:]                                                              # middle or at the end is often the
+                                                                                     # value's head ("New York Avenue",
+                                                                                     # "50,000 excluding VAT")
     out = " ".join(kept).strip(" ,;:.")
     return out or key
 
@@ -437,7 +437,7 @@ def _built(arm_root: Path, scope: str, build: Callable) -> dict:
 
 
 def estimate(sessions: list[dict], questions_path: str, *, raw, model: str, out: str, arms=ARMS,
-             window_tokens: int = 150_000, extract_client=None) -> dict:
+             window_tokens: int = 150_000, extract_client=None, say: Callable = lambda *_: None) -> dict:
     """The whole run's spend, from every arm run on the first scope only (it spends that scope's share): each arm's
     answers scaled by the question count, its write path by the scope count."""
     qs = [json.loads(x) for x in Path(questions_path).read_text().splitlines() if x.strip()]
@@ -450,8 +450,10 @@ def estimate(sessions: list[dict], questions_path: str, *, raw, model: str, out:
     root.mkdir(parents=True, exist_ok=True)
     qp = root / "questions.jsonl"
     qp.write_text("".join(json.dumps(q, ensure_ascii=False) + "\n" for q in qs if q["scope"] == first))
+    say(f"estimate: every arm on scope {first} ({sum(1 for q in qs if q['scope'] == first)} questions); memory_v2's "
+        "write path alone can take minutes")
     rep = evaluate(scopes[first], str(qp), raw=raw, model=model, out=str(root), arms=arms, window_tokens=window_tokens,
-                   extract_client=extract_client, say=lambda *_: None)
+                   extract_client=extract_client, say=say)
     n_first = sum(1 for q in qs if q["scope"] == first)
     est = sum(v["cost"]["answers_usd"] / max(1, n_first) * len(qs) + v["cost"]["write_path_usd"] * len(asked)
               for v in rep["arms"].values())
@@ -622,7 +624,11 @@ def report(root: Path, rows, built, arms, qhash, model, n_questions) -> dict:
             out["arms"][arm]["against_history"] = {"difference": b["delta"], "interval": b["interval"],
                                                    "held": quality.held(b["delta"], b["interval"][0]), "verdict": quality.verdict(b)}
     out["coverage"] = _coverage(root)
-    out["total_spend_usd"] = sum(v["cost"]["answers_usd"] + v["cost"]["write_path_usd"] for v in out["arms"].values())
+    arms_usd = sum(v["cost"]["answers_usd"] + v["cost"]["write_path_usd"] for v in out["arms"].values())
+    extra = {k: (_spent(root / d)["usd"] if (root / d).is_dir() else 0.0)      # what else this --out spent: its estimate and
+             for k, d in (("estimate", "estimate"), ("drafting", "questions-store"))}   # the question drafting
+    out["spend"] = {"arms": arms_usd, **extra}
+    out["total_spend_usd"] = arms_usd + sum(extra.values())
     out["verdict"] = verdict(out)
     from . import friction
     friction.report("eval_memory")
@@ -664,7 +670,11 @@ def verdict(r: dict) -> list[str]:
                      f"(at least {MIN_SCOPES_FOR_INTERVALS}); read the differences, question by question, not the intervals")
     lines.append(f"cheapest arm holding quality against carried history, on value match: {best[0]} (${best[1]:.4f} a question)")
     if r.get("total_spend_usd") is not None:
-        lines.append(f"total spend: ${r['total_spend_usd']:.2f} at list prices (answers and write paths, every arm)")
+        sp = r.get("spend") or {}
+        parts = [f"every arm's answers and write paths ${sp.get('arms', r['total_spend_usd']):.2f}"] + \
+            [f"{label} ${sp[k]:.2f}" for k, label in (("estimate", "the estimate"), ("drafting", "drafting the questions"))
+             if sp.get(k)]
+        lines.append(f"total spend: ${r['total_spend_usd']:.2f} at list prices ({'; '.join(parts)})")
     if r.get("coverage") is not None:
         from . import coverage
         lines.append(coverage.line(r["coverage"], watched=r["coverage"].get("watched", False)))

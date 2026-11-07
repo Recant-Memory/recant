@@ -1,13 +1,64 @@
 # Recant Memory
 
+**See what your Anthropic calls cost, and what you'd save, on your normal traffic. One line to add.**
+
+```
+pip install "recant[anthropic]"
+```
+
+```python
+import anthropic, recant
+
+client = recant.wrap(anthropic.Anthropic())        # or anthropic.AsyncAnthropic(); wrap each client your app builds
+# ...run your app as you normally do: sync, async, streaming and tool loops all work; nothing else changes...
+```
+
+```
+recant cost      # what you spent, and what Recant would save with no change to what the model sees
+recant apply     # turn those savings on (recant apply --dry-run shows each change first)
+recant cost      # after 50 runs or 7 days: what you actually saved, against the prediction
+```
+
+- **No configuration.** The store is `./.recant/` in the directory your app runs from (or `$RECANT_HOME`), with its
+  own `.gitignore`; run the `recant` commands from the same directory. It holds counts, token figures, timings and
+  hashes of what was sent, never the text of a prompt, a reply or a tool result. Nothing leaves your machine.
+- **Two or more agents?** Optional: `with client.run("researcher", session=conversation_id):` around one agent's
+  calls and `client.run("writer", session=conversation_id)` around another's, on whichever wrapped client each uses
+  (`async with` on an async one), and the report sizes each apart. `session` is the user's conversation: the gaps
+  between its runs size the cache-lifetime levers.
+- **Safe by construction.** `recant apply` changes only cache markers: the model is sent the same input. `recant off`
+  makes the wrapper a pure pass-through again.
+- **Honest from the first report.** After about 20 calls it says what you spent and what it can save, in dollars on
+  the calls it measured; with fewer it says it is too early. A model with no price is named, never dropped.
+- **For coding agents.** `recant doctor` checks the setup in one go; every command takes `--json`. `AGENTS.md` has the
+  recipe, and `skills/recant/` a Claude Code skill (install below).
+
+When you want proof beyond the safe savings, `recant bench` compares your app with and without Recant on your own
+tasks, and `recant eval memory` measures memory on your own sessions (both below).
+
+### Using it from a coding agent
+
+Ask Claude Code or Codex to "add Recant (pip package `recant`) to this app and show me what it would save". To give
+Claude Code the recipe as a skill, from your project:
+
+```
+mkdir -p .claude/skills/recant
+curl -fsSL https://raw.githubusercontent.com/recant-memory/recant/main/skills/recant/SKILL.md -o .claude/skills/recant/SKILL.md
+```
+
+For Codex, or any agent that reads `AGENTS.md`, copy the first section of Recant's `AGENTS.md` ("Adding Recant to an
+app") into your project's `AGENTS.md`. `llms.txt` lists the whole surface in one file.
+
+## What Recant is
+
 Recant makes an agent's context cost less, for the same or better answers. It has three parts, and you can use any
 one of them alone:
 
 1. **A cost saver.** Recant meters every model call your agent makes and finds what it is paying for that it need
    not: requests that could be read from the cache, cache lifetimes, output caps, effort, tool output, loops. It
-   prices each lever in dollars on your own traffic and applies the safe ones itself — those that change only cache
-   markers, never what the model sees — then checks each one's realized saving against its prediction and reverts
-   one that does not deliver. Everything else is reported with its price and left to you.
+   prices each lever in dollars on your own traffic and applies the safe ones on `recant apply` — those that change
+   only cache markers, never what the model sees — then checks each one's realized saving against its prediction and
+   reverts one that does not deliver. Everything else is reported with its price and left to you.
 2. **Managed memory.** By default, notes: the agent writes keyed, dated facts with one tool; Recant checks each
    against the conversation it came from, keeps the history, and renders the notes into the cached prefix. The
    fallback, for a scope that outgrows notes, is extracted memory: a store with a review lifecycle, a task ledger,
@@ -29,7 +80,7 @@ pip install "recant[anthropic]"
 Or from GitHub, pinned to a tag:
 
 ```
-pip install "recant[anthropic] @ git+https://github.com/recant-memory/recant@v0.3.3"
+pip install "recant[anthropic] @ git+https://github.com/recant-memory/recant@v0.4.0"
 ```
 
 `recant --version` prints the version and the commit it was built from: `release build` from PyPI (0.3.3 on),
@@ -44,41 +95,58 @@ Nothing. Recant writes files under the store directory you give it and sends not
 from your client as before. The log keeps counts, token figures, timings and hashes of what was sent — never the text
 of a prompt, a reply or a tool result. Your notes and memories are markdown files in the same store.
 
-## Quickstart 1: see what your agent costs
-
-If your agent calls the Anthropic SDK, wrap the client. That is the only change:
+## Quickstart 1, in detail: wrapping your client
 
 ```python
 import anthropic, recant
 
-client = recant.wrap(anthropic.Anthropic(), store="store", tenant="demo")
-with client.run("agent", session="task-1"):           # one run per task or conversation
+client = recant.wrap(anthropic.Anthropic())            # store and tenant optional: store="dir", tenant="name"
+with client.run("agent", session="chat-1"):            # optional: name the agent and the conversation
     r = client.messages.create(model="claude-sonnet-5-5", max_tokens=300, system=SYSTEM, messages=msgs)
 ```
 
-`run`'s first argument is the job: the calls inside it are reported, and their levers sized and opted in, under that
-name. `session` is the conversation the run belongs to: the advisor reads the gaps between runs of one session to size
-the cache-lifetime and hand-off levers, so give it the user's conversation id (the same for each agent's run in it),
-not a fresh id per task. A run is a context (a `ContextVar`): `asyncio.to_thread` carries it into the thread, and a run
-opened inside a thread works as well. `store=` is fixed when you wrap: a relative path is resolved then. A multi-agent host names each agent: `with client.run("researcher", session=task_id):` around the researcher's
-calls and `client.run("writer", ...)` around the writer's, on one wrapped client or several (wrap each client you have,
-`Anthropic` and `AsyncAnthropic` alike, with the same store and tenant). A call outside any run is wrap's own job
-(`recant.wrap(..., job=...)`, default "agent"). A tool loop can put the response's content blocks back in `messages`
-as the SDK returns them (`{"role": "assistant", "content": r.content}`); the wrapper sends them as the SDK would. A
-request holding anything but plain dicts, lists, scalars and the SDK's own models (an iterator, a tuple, a set, a file,
-an omission sentinel) is sent as your own objects, untouched, with no lever applied to it. If
-Recant's own code fails on a call (preparing it, reading its response or stream, opening or closing its run, reading
-the switch), the call goes out as you built it, you get the response, and the failure is counted in the friction log;
-the coverage watch never fails an HTTP request. `recant.wrap(...)` itself raises on a store it cannot create.
+- **Two or more agents, or clients.** Wrap each client you have, `Anthropic` and `AsyncAnthropic` alike; they share
+  the default store. Put `with client.run("researcher", session=conversation_id):` around one agent's calls and
+  `client.run("writer", ...)` around another's, and `recant cost` reports and sizes each apart. A call outside any run
+  is wrap's own job (`recant.wrap(..., job=...)`, default "agent").
+- **`session`** is the conversation a run belongs to. The advisor reads the gaps between runs of one session to size
+  the cache-lifetime and hand-off levers, so give it the user's conversation id (the same for each agent's run in it),
+  not a fresh id per task.
+- **Threads and asyncio.** A run is a context (a `ContextVar`): `asyncio.to_thread` carries it into the thread, and a
+  run opened inside a thread works as well; concurrent runs are metered apart.
+- **Tool loops** can put the response's content blocks back in `messages` as the SDK returns them
+  (`{"role": "assistant", "content": r.content}`); the wrapper sends them as the SDK would. A request holding anything
+  but plain dicts, lists, scalars and the SDK's own models (an iterator, a tuple, a set, a file, an omission sentinel)
+  is sent as your own objects, untouched, with no lever applied to it.
+- **Recant never breaks a call.** If Recant's own code fails on a call (preparing it, reading its response or stream,
+  opening or closing its run, reading the switch), the call goes out as you built it, you get the response, and the
+  failure is counted in the friction log; the coverage watch never fails an HTTP request. `recant.wrap(...)` itself
+  raises on a store it cannot create.
+- **The store** is fixed when you wrap: a relative path is resolved then.
+- **Checking the pass-through yourself.** Hash each request body as the SDK sends it, run once with `recant off` and
+  once with `recant on` before `recant apply`: the digests match, and match the unwrapped client's. After `recant
+  apply` the only difference is `cache_control` fields.
 
-Then, after a few dozen runs:
+  ```python
+  import hashlib, anthropic, recant
+  def show(request):
+      print(hashlib.sha256(request.content).hexdigest()[:16], request.url.path)
+  client = recant.wrap(anthropic.Anthropic(http_client=anthropic.DefaultHttpxClient(event_hooks={"request": [show]})))
+  ```
+- **Thinking you didn't ask for.** Some models think by default: Claude Haiku 5.5 uses adaptive thinking unless the
+  request sends `thinking: {"type": "disabled"}`, so a job on it with no `thinking` parameter shows a reasoning share
+  in `recant cost`, and its thinking counts against `max_tokens` (a low cap can leave no room for the text).
+
+Then, after a few dozen calls:
 
 ```
-recant cost --store store --tenant demo               # the bill, split; the levers, each priced in dollars
-recant cost --store store --tenant demo --nightly     # apply the safe levers that pay; check the ones applied earlier
+recant cost                      # spent, can save, measured on; the bill split; the levers, each priced in dollars
+recant apply --dry-run           # what each safe lever would change in a request
+recant apply                     # turn them on
+recant cost --nightly            # schedule it: apply what newly pays, check what was applied, revert what did not deliver
 ```
 
-Schedule the second line nightly. An applied lever is carried out on the wrapper's next `create`; the request it sends
+Schedule the last line nightly. An applied lever is carried out on the wrapper's next `create`; the request it sends
 differs from yours only in cache markers, and each call is checked for that (a request that would differ in anything
 else is sent as you built it). After 50 runs or seven days the nightly pass prices the same calls both ways and
 records the lever's realized saving against its prediction; one that does not deliver is reverted. `recant cost
@@ -92,7 +160,7 @@ output. On the async client `async with client.run(...)` works too, and each run
 at once are metered apart. `examples/cost_quickstart_async.py` is the same agent, async and streamed:
 
 ```python
-client = recant.wrap(anthropic.AsyncAnthropic(), store="store", tenant="demo")
+client = recant.wrap(anthropic.AsyncAnthropic())
 async with client.run("agent", session="task-1"):
     async with client.messages.stream(model="claude-sonnet-5-5", max_tokens=1024, system=SYSTEM, messages=msgs) as s:
         text = await s.get_final_text()
@@ -164,7 +232,7 @@ calls (unseen: 41 calls to openrouter.ai, model glm-latest)".
   other host whose body looks like a model call is counted as `other`, with the domain hashed. It hooks the HTTP library
   the SDKs share (httpx, or httpx2), so it does not see a client built on another one (boto3's Bedrock client,
   `requests`), nor subprocesses such as Claude Code.
-- **Against your own totals.** `recant coverage --usage runs.jsonl --store store --tenant demo` matches your own
+- **Against your own totals.** `recant coverage --usage runs.jsonl` matches your own
   per-run log (JSON lines: `ts`, an ISO time, with its offset or taken as UTC; `model`; `tokens_in`, the uncached input,
   cache reads and writes apart; `tokens_out`; `cache_read`; `cache_write`, or the Anthropic SDK's own names for the
   four, `input_tokens`, `output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`; optional `billed`:
@@ -334,7 +402,8 @@ recant bench --tasks tasks.jsonl --run mypkg.agent:run_task --grade mypkg.agent:
   call, each lever's realized saving against its frozen prediction (met when within a quarter), failures and
   equivalence per arm, and plain verdict lines. What is frozen is each lever's share of the bill; its dollars, and the
   cost per task it predicts, are at the report's prices, so `recant bench --out DIR --report --prices prices.json`
-  restates both sides of every prediction at your table.
+  restates both sides of every prediction at your table. The bench's measured saving is on its own tasks, run its
+  own way (paired, in alternating order), so it can differ from what `recant cost` predicts on your everyday traffic.
 - `--arm-a safe --arm-b safe` is an A/A run: both arms write caches, each under its own salt, and the difference's
   interval should contain zero. `--arm-a safe --arm-b safe+reasoning.agent` measures one your-call lever against the
   safe set alone. An existing `--out` directory resumes, counting only the attempt that finished each task; a different
@@ -376,7 +445,9 @@ recant eval memory --sessions sessions.jsonl --questions questions.jsonl
   little. Scoring is mechanical: the answer's words on the reply's `ANSWER:` line. An absent
   question scores the abstention, the same in every arm that does not invent an answer.
 
-**Tell us: `recant feedback`.** Asks six optional questions (two minutes), prints the whole bundle and writes
+**Tell us: `recant feedback`.** Asks six optional questions (two minutes: minutes from install to your first
+report; where you had to read Recant's code or guess; the errors you hit; what you wanted to measure and couldn't;
+whether you would leave it on; anything else; piped answers work, one per line), prints the whole bundle and writes
 `recant-feedback-<date>.zip` on your yes: the reports' numbers, versions, OS, the features you used, error classes and
 counts, the coverage of the store you name (`--store`, `--tenant`) by provider and public model, and your setup
 friction (every `recant` command, and any failure of Recant's own code inside a wrapped call, logs locally to
@@ -451,9 +522,6 @@ evidence is the agent's own failed call, its retries, or the agent's own account
   (Sonnet 5.5 takes `between_tools`; Opus 5.5 and Fable 5.1 cannot turn it off). On one τ-bench run (Sonnet 5.5, 150
   pairs; `CHANGELOG.md`, 0.2.x) it cut reasoning from 277 to 23 tokens a task and cost +3.1% a task (95% −0.6% to +6.7%), with quality −1.3
   points (95% −7.3 to +4.7): it stays off for work like that.
-- **The memory eval's words-only check reads words of two characters or more.** A key whose deciding part is one
-  letter or digit ("A minus", "plan B") is not told from another ("B minus"); write such a key as the value's longer
-  form, or check those answers by hand.
 - **Notes mode is not in `recant bench` yet.** The wrapper does not carry managed notes, so there is no notes arm.
 - **One client per bench.** A host whose agents use a sync and an async client is benched on one of them (above).
 - **One provider.** The wrapper and the levers are Anthropic's. A second provider's wrapper is built when coverage

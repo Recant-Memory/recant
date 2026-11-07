@@ -21,11 +21,13 @@ Then `recant cost --store store --tenant t1` prices the calls and, with `--night
 carries it out. The host shape the advisor needs is written to the store once, where `recant cost` finds it."""
 from __future__ import annotations
 
+import atexit
 import datetime
 import inspect
 import sys
 import time
 import types
+import weakref
 from contextvars import ContextVar
 from typing import Any, Optional
 
@@ -226,7 +228,7 @@ class _Call:
         else:
             built = _plain(host)                                         # the SDK's own blocks as the SDK sends them
         ov = costshape.overlay(w.layout, w.tenant) if (apply and w.apply_levers) else {}
-        sent = levers.apply(built, ov) if ov else dict(built)
+        sent = levers.apply(built, ov, job=self.job) if ov else dict(built)
         self.equivalent = True if opaque else quality.equivalent(built, sent)
         if not self.equivalent:                                          # never send what the host did not build, bar the markers
             sent = dict(built)
@@ -553,13 +555,25 @@ class _Run:
         self.__exit__(*exc)
 
 
+_OPEN: "weakref.WeakSet" = weakref.WeakSet()          # wrappers not closed yet; held weakly, so one let go is freed
+
+
+def _close_at_exit() -> None:
+    for w in list(_OPEN):
+        w.close()
+
+
+atexit.register(_close_at_exit)
+
+
 class Wrapped:
     def __init__(self, client, *, store, tenant: str, job: str = "agent", key_label: Optional[str] = None, apply_levers: bool = True,
                  watch: bool = True):
         self.client, self.tenant, self.job, self.key_label, self.apply_levers = client, tenant, job, key_label, apply_levers
         self.layout = store if isinstance(store, StoreLayout) else StoreLayout(store)
-        self._readied = False                                            # the store is written on the first metered call
-        self.meter = Meter(self.layout, tenant, key_label=key_label)       # calls made outside any run
+        self._readied = False                                            # the store is made here, unless the switch is off
+        self.meter = Meter(self.layout, tenant, key_label=key_label, threads=True)   # calls made outside any run,
+        _OPEN.add(self)                                                  # threaded by content; their run closes at exit
         self.is_async = _is_async(client)
         self.messages = _AsyncMessages(self) if self.is_async else _Messages(self)
         self._current: ContextVar = ContextVar(f"recant_run_{id(self)}", default=None)
@@ -617,6 +631,7 @@ class Wrapped:
         return _Run(self, job or self.job, session, params)
 
     def close(self) -> None:
+        _OPEN.discard(self)
         try:
             self.meter.close()
         except Exception as exc:                                         # noqa: BLE001 — never the host's error
@@ -624,7 +639,11 @@ class Wrapped:
             friction.wrapper_failed(exc)
 
 
-def wrap(client, *, store, tenant: str, job: str = "agent", key_label: Optional[str] = None, apply_levers: bool = True,
-         watch: bool = True) -> Wrapped:
-    """`watch=False` turns off the coverage watch (`recant.coverage`) for this process's wrappers that ask for it."""
-    return Wrapped(client, store=store, tenant=tenant, job=job, key_label=key_label, apply_levers=apply_levers, watch=watch)
+def wrap(client, *, store=None, tenant: Optional[str] = None, job: str = "agent", key_label: Optional[str] = None,
+         apply_levers: bool = True, watch: bool = True) -> Wrapped:
+    """`recant.wrap(client)` is all it takes: with no `store` the store is `$RECANT_HOME` or `./.recant/`, with no
+    `tenant` it is "default" (`recant.home`), and every `recant` command finds the same. `watch=False` turns off the
+    coverage watch (`recant.coverage`) for this process's wrappers that ask for it."""
+    from . import home
+    return Wrapped(client, store=home.store_or_default(store), tenant=home.tenant_or_default(tenant), job=job,
+                   key_label=key_label, apply_levers=apply_levers, watch=watch)

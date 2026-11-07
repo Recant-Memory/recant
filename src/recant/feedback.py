@@ -37,7 +37,7 @@ failed_calls_usd failed_commands failed_tasks failures features first_command_ts
 gaps grader growth_per_call_median header held help_calls history id input input_per_mtok interval jobs kind latency
 levers machine memory_measured memory_served_median memory_v2 met minutes_to_first_report mixed_versions model models n
 net none not_equivalent notes eval_notes_arm opted_in order_seed os output output_per_call_median output_per_mtok over_60_min
-over_switch_point p50 p95 paired_difference_per_task paired_task_difference_s pairs pairs_with_a_failure pass_rate
+over_switch_point p50 p95 slow longest slow_ttft paired_difference_per_task paired_task_difference_s pairs pairs_with_a_failure pass_rate
 per_call per_correct_usd per_passed_task_relative per_question_usd per_task predicted_usd predictions
 predictions_anchored_in predictions_sha256 predicted_usd_at_freeze price_tags priced prices python quality questions questions_sha256 ratio
 read_x realized_usd reasoning reasoning_share_of_output recall recant recant_overhead refused refused_reasons relative report
@@ -47,7 +47,7 @@ start_write store_copied store_from_copy streaming tasks_paired tasks_run text t
 total_spend_usd ttft uncached under_5_min unpriced unpriced_calls unpriced_models update usd values verdict version warm_start_share warnings
 without_first_task write_added write_on_request_path write_path_s write_path_usd write_x written 5_to_60_min
 coverage calls_seen calls_unseen share_calls usd_seen usd_unseen share_usd unseen_unpriced watched unseen provider host
-requests with_usage usd_list usage wrapper_errors state row batch_factor cache_write_long above over
+requests with_usage usd_list usage wrapper_errors state row spend drafting batch_factor cache_write_long above over
 5 10 25 50 100
 """.split()) | {"10% fewer calls", "10% smaller start context", "10% less added per call", "10% less output"}
 LISTED_BY_VALUE = frozenset({"scopes", "tokens_per_scope", "refused_reasons", "jobs", "opted_in", "errors", "prices"})
@@ -220,7 +220,7 @@ def build(*, bench_dirs: list[Path], eval_dirs: list[Path], cost_json: Optional[
 
 
 QUESTIONS = [
-    ("minutes_to_first_report", "Minutes from install to your first report"),
+    ("minutes_to_first_report", "Minutes from install to your first report (the hint counts from your first recant command)"),
     ("had_to_read_code_or_guess", "Where did you have to read Recant's code, guess, or search? (on one line, ';' between items)"),
     ("errors_hit", "Which errors did you hit?"),
     ("could_not_measure", "What did you want to measure that the kit couldn't?"),
@@ -257,9 +257,22 @@ def ask_form(ask: Callable = input, say: Callable = print) -> dict:
     return out
 
 
+def _answers_or_blank(ask: Callable) -> Callable:
+    """`ask`, with the end of input read as a blank answer: piped answers work, and a closed stdin skips what is left
+    (and so declines to write)."""
+    def inner(prompt):
+        try:
+            return ask(prompt)
+        except EOFError:
+            return ""
+    return inner
+
+
 def run(*, bench_dirs, eval_dirs, cost_json=None, out_dir: Path = Path("."), form: bool = True,
         ask: Callable = input, say: Callable = print) -> Optional[Path]:
-    """Asks before writing, always (no flag skips it)."""
+    """Asks before writing, always (no flag skips it). With no input left, every answer is blank and nothing is
+    written."""
+    ask = _answers_or_blank(ask)
     answers = ask_form(ask, say) if form else None
     bundle, dropped = build(bench_dirs=bench_dirs, eval_dirs=eval_dirs, cost_json=cost_json, form=answers)
     text_ = json.dumps(bundle, indent=1, ensure_ascii=False)

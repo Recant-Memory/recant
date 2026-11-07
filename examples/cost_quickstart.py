@@ -4,12 +4,12 @@ follow-up questions per task. The only Recant line is the wrap; every call is me
 levers Recant applies (cache breakpoints, cache lifetime) are carried out on the next request with no other change.
 
     pip install "recant[anthropic]"
-    ANTHROPIC_API_KEY=... python examples/cost_quickstart.py STORE_DIR --tasks 30    # shadow: nothing applied yet
-    recant cost --store STORE_DIR --tenant demo                                       # what it costs; the levers, priced
-    recant cost --store STORE_DIR --tenant demo --nightly                             # apply what is safe and pays
-    ANTHROPIC_API_KEY=... python examples/cost_quickstart.py STORE_DIR --tasks 50    # the same code, levers carried out
-    recant cost --store STORE_DIR --tenant demo --nightly                             # check: realized against predicted
-    recant cost --store STORE_DIR --tenant demo
+    ANTHROPIC_API_KEY=... python examples/cost_quickstart.py --tasks 30    # nothing applied yet; the store is ./.recant
+    recant cost                                                           # spent, can save, measured on; the levers, priced
+    recant apply                                                          # turn the safe savings on
+    ANTHROPIC_API_KEY=... python examples/cost_quickstart.py --tasks 50    # the same code, levers carried out
+    recant cost --nightly                                                 # check: realized against predicted
+    recant cost
 
 Add --offline to run without a key (a placeholder client that bills cached reads as the API does). `recant cost` reads
 only the store: it calls nothing and sends nothing. A lever is checked after 50 runs (or seven days) since it was applied,
@@ -24,7 +24,7 @@ from types import SimpleNamespace
 
 import recant
 
-TENANT = "demo"
+TENANT = "default"             # Recant's default tenant: every recant command finds it with no flag
 MODEL = "claude-sonnet-5-5"
 
 # Your agent's own prompt. Long and stable, as most agents' instructions and reference material are.
@@ -114,7 +114,7 @@ class OfflineSDK:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("store")
+    ap.add_argument("store", nargs="?", help="the store; default Recant's own ($RECANT_HOME or ./.recant)")
     ap.add_argument("--tasks", type=int, default=30)
     ap.add_argument("--start", type=int, default=None, help="first task number (default: after the last one run)")
     ap.add_argument("--offline", action="store_true")
@@ -124,8 +124,8 @@ def main(argv=None) -> int:
     else:
         import anthropic
         sdk = anthropic.Anthropic(timeout=anthropic.Timeout(120.0, connect=10.0))        # your own idle timeout (the SDK's default is 600 s); retries are yours too
-    client = recant.wrap(sdk, store=a.store, tenant=TENANT)            # the one line: meter every call, carry out the levers
-    mark = Path(a.store) / "cost_quickstart.next"
+    client = recant.wrap(sdk, store=a.store)            # the one line: meter every call, carry out the levers
+    mark = client.layout.root / "cost_quickstart.next"
     start = a.start if a.start is not None else int(mark.read_text()) if mark.exists() else 0
     for i in range(start, start + a.tasks):
         task(client, i)

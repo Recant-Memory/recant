@@ -129,7 +129,10 @@ def test_four_arms_scored_against_history_with_the_write_path_counted(sess, tmp_
     v = rep["verdict"]
     assert v[0].startswith("none: ") and "words only" in v[0].split(",")[0]                        # leads with the strict score
     assert any(x.startswith("cheapest arm holding quality against carried history, on value match:") for x in v)
-    assert rep["total_spend_usd"] == pytest.approx(sum(x["cost"]["answers_usd"] + x["cost"]["write_path_usd"] for x in a.values()))
+    arms = sum(x["cost"]["answers_usd"] + x["cost"]["write_path_usd"] for x in a.values())
+    assert rep["spend"]["arms"] == pytest.approx(arms) and rep["spend"]["drafting"] > 0      # drafted into the same --out
+    assert rep["total_spend_usd"] == pytest.approx(arms + rep["spend"]["drafting"] + rep["spend"]["estimate"])
+    assert any("drafting the questions $" in x for x in rep["verdict"])
     assert any(x.startswith("total spend: $") for x in v)
     md = (tmp_path / "e" / "report.md").read_text()
     assert md.startswith("# recant eval memory") and "Recant's own time per call p50" in md and ", p95 " in md
@@ -200,14 +203,15 @@ def test_a_right_answer_in_the_principals_own_format_is_right():
 
 @pytest.mark.parametrize("question,drafted,key", [
     ("Which project do I manage?", "Project Juniper", "Juniper"),
-    ("What project do I run, and for which cooperative?", "Project Alder, Brook Cooperative", "Alder, Brook"),
-    ("What is the deadline now?", "the 14 March deadline", "14 March"),
+    ("What project do I run, and for which cooperative?", "Project Alder, Brook Cooperative", "Alder, Brook Cooperative"),
+    ("What is the deadline now?", "the 14 March deadline", "14 March deadline"),
+    ("What is my budget cap, with or without VAT?", "EUR 50,000 excluding VAT", "EUR 50,000 excluding VAT"),   # never the end
     ("Who is our accountant?", "Alice Example", "Alice Example"),
     ("How should prices be quoted to me?", "including German VAT", "including German VAT"),   # not the drafter's to judge:
     ("What is my name?", "name", "name"),                                                    # kept, listed to check
     ("What is my New York office address?", "10 New York Avenue", "10 New York Avenue"),     # a word inside is the value's
 ])
-def test_a_suggested_key_drops_the_question_s_words_from_its_ends(question, drafted, key):
+def test_a_suggested_key_drops_the_question_s_words_from_its_start(question, drafted, key):
     """The suggestion only: the 0.3.2 drafter, told to write minimal keys, still wrote 'Project <name>' (an outside
     developer trimmed 6 of 26 by hand). It is never applied by itself: see the next test."""
     assert em.trim_key(question, drafted) == key
@@ -330,3 +334,16 @@ def test_drafting_keeps_the_drafter_s_key_and_lists_the_suggestion(tmp_path):
     row, = [json.loads(x) for x in (tmp_path / "q.jsonl").read_text().splitlines()]
     assert row["answer"] == "New York Avenue" and row["answer_suggested"] == "Avenue"
     assert out["keys_to_check"] == [{"id": row["id"], "answer": "New York Avenue", "suggested": "Avenue"}]
+
+
+def test_eval_json_puts_only_json_on_stdout(sess, tmp_path, monkeypatch, capsys):
+    from recant import cli
+    import recant.clients.anthropic as ca
+    monkeypatch.setattr(ca, "raw_sdk", lambda is_async=False: FakeSDK())
+    p = tmp_path / "sessions.jsonl"
+    p.write_text("".join(json.dumps(s) + "\n" for s in SESSIONS))
+    qp = tmp_path / "q.jsonl"
+    assert cli.main(["eval", "memory", "--sessions", str(p), "--make-questions", "--questions", str(qp),
+                     "--out", str(tmp_path / "e"), "--json"]) == 0
+    r = json.loads(capsys.readouterr().out)
+    assert r["kept"] == 5 and r["questions_path"] == str(qp.resolve())

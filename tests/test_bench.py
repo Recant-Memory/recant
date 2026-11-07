@@ -154,7 +154,11 @@ def test_the_safe_arm_carries_its_lever_out_against_a_prediction_frozen_first(se
     salts = rep["header"]["salts"]
     for key in api.cache:
         assert sum(s in key for s in salts.values()) == 1
-    assert (tmp / "safe" / "report.md").read_text().startswith("# recant bench")
+    md = (tmp / "safe" / "report.md").read_text()
+    assert md.startswith("# recant bench")
+    from recant import bench as bench_
+    setup_md = bench_.render(dict(rep, setup={"commands": 4, "help_calls": 1}))
+    assert "- commands: 4" in setup_md and '{"commands"' not in setup_md            # a list, not a raw JSON dump
 
 
 def test_a_failed_task_stays_in_its_arm_as_a_failure(setup):
@@ -163,7 +167,7 @@ def test_a_failed_task_stays_in_its_arm_as_a_failure(setup):
     f = rep["failures"]
     assert f["B"]["failed_tasks"] == 2 and f["A"]["failed_tasks"] == 0 and f["B"]["errors"] == {"RuntimeError": 2}
     assert rep["header"]["tasks_paired"] == 8                                                # none dropped
-    assert any("failures differ" in x for x in rep["verdict"])
+    assert any("runs that raised differ" in x for x in rep["verdict"])
     assert rep["quality"]["pass_rate"]["B"] < rep["quality"]["pass_rate"]["A"]
 
 
@@ -321,3 +325,14 @@ def test_the_loss_guard_reads_the_interval_for_whichever_arm_is_safe(setup):
     r["quality"] = dict(r["quality"], pass_rate={"A": 0.0, "B": 1.0}, difference=1.0, interval=(1.0, 1.0))
     q, = [x for x in bench.verdict_lines(r) if x.startswith("quality")]
     assert not q.startswith("quality: unchanged by construction")
+
+
+def test_bench_json_puts_only_json_on_stdout(setup, capsys):
+    from recant import cli
+    tmp, tasks = setup
+    (tmp / "json_hooks.py").write_text("import test_bench\ndef make0():\n    return test_bench.SimAPI()\n")
+    assert cli.main(["bench", "--tasks", tasks(6), "--run", "bench_agent:run_task", "--grade", "bench_agent:grade",
+                     "--client", "json_hooks:make0", "--estimate", "--json", "--calibrate", "2", "--out", str(tmp / "bj")]) == 0
+    cap = capsys.readouterr()
+    est = json.loads(cap.out)["estimate"]
+    assert est["tasks_run"] == 2 + 2 * 4 and "estimated spend" in cap.err                # progress on stderr

@@ -279,7 +279,8 @@ def test_reconcile_names_the_unpriced_model_it_leaves_out_of_the_cost_share():
                            cs.LIST_PRICES[m].bill(u.get("input", 0), u.get("cache_write", 0), u.get("cache_read", 0), u.get("output", 0)))
     text = coverage.render_reconcile(r)
     assert "Recant saw 99.8% of the tokens" in text
-    assert "unpriced, so left out of the cost share: gpt-4o-mini (445 tokens, 0% seen)" in text
+    assert "the cost share is not known: tokens went unseen on models with no price (gpt-4o-mini (445 tokens, 0% seen))" in text
+    assert "% of the list-priced cost" not in text                    # never a share that leaves the unseen out
 
 
 def test_a_usage_file_in_the_sdk_s_names_with_a_local_offset_reads_as_recant_s_utc_day(tmp_path):

@@ -89,10 +89,18 @@ class Meter:
     log run per host run (`run()`); nothing is sent anywhere. Request fields are the host's own (model, system, tools,
     messages as plain data); only hashes and counts are kept."""
 
-    def __init__(self, layout, tenant: str, *, key_label: Optional[str] = None):
+    THREADS_KEPT = 4096                         # recent requests remembered for threading calls that name no session
+
+    def __init__(self, layout, tenant: str, *, key_label: Optional[str] = None, threads: bool = False):
+        """`threads`: give a call that names no session the conversation it continues, found by content (recant.wrap's
+        meter for calls outside any client.run, where many conversations may be in flight at once)."""
         self.layout, self.tenant, self.key_label = layout, tenant, key_label
         self.log = None
         self._last: dict = {}
+        self._threads = threads
+        self._seen: dict = {}                   # the hash of a request's messages -> the conversation it belongs to
+        self._tip: dict = {}                    # a conversation -> the hash of its latest request
+        self._n = 0
         self._lock = threading.Lock()          # a host's threads may share a meter: the log is opened once
 
     def run(self, job: str, **params):
@@ -119,9 +127,12 @@ class Meter:
         """`usage`: input (uncached), output, cache_read, cache_write, and optionally cache_write_long and reasoning.
         `via`, `billing`, `calls`: a tool's own totals (`from_claude_code`, `from_agent_sdk`)."""
         msgs = [canonical_json(m) for m in (messages or [])]
-        prev = self._last.get((job, session))
-        extends = None if prev is None else (len(msgs) > len(prev) and msgs[:len(prev)] == prev)
-        self._last[(job, session)] = msgs
+        if self._threads and session is None and msgs:
+            session, extends = self._thread(job, msgs)
+        else:
+            prev = self._last.get((job, session))
+            extends = None if prev is None else (len(msgs) > len(prev) and msgs[:len(prev)] == prev)
+            self._last[(job, session)] = msgs
         body = {"model": model, "effort": effort, "max_tokens": max_tokens, "reasoning": reasoning, "schema": None,
                 "tools": tools or [], "instructions": system}
         fp = hashlib.sha256(canonical_json(body).encode()).hexdigest()[:16]
@@ -137,6 +148,29 @@ class Meter:
             log = self.log
         log.emit("model_call", **rec)
         return rec
+
+    def _thread(self, job: str, msgs: list) -> tuple:
+        """(the conversation, whether this request extends an earlier one of it): the longest earlier request of the
+        job whose messages are a strict prefix of these continues; else a new conversation starts. This is how the cache
+        itself finds a prefix, so concurrent conversations are told apart however their calls interleave."""
+        h, cum = hashlib.sha256(job.encode()), []
+        for m in msgs:
+            h.update(b"\x00" + m.encode())
+            cum.append(h.hexdigest()[:24])
+        with self._lock:
+            hit = next((k for k in reversed(cum[:-1]) if k in self._seen), None)
+            conv = self._seen.get(hit) if hit else None
+            extends = conv is not None and self._tip.get(conv) == hit   # it continues that conversation's latest request
+            if not extends:                                  # new, or a branch off an earlier point of one: its own
+                self._n += 1                                 # conversation, which reuses nothing it cannot be sure of
+                conv = f"auto:{cum[0][:8]}-{self._n}"
+            self._seen[cum[-1]] = conv
+            self._tip[conv] = cum[-1]
+            for d in (self._seen, self._tip):                # bounded: the oldest go first
+                if len(d) > self.THREADS_KEPT:
+                    for k in list(d)[: len(d) - self.THREADS_KEPT]:
+                        del d[k]
+        return conv, extends
 
     def tool(self, *, name: str, session: Optional[str] = None, input: Optional[dict] = None, bytes_fetched: Optional[int] = None,
              bytes_to_model: Optional[int] = None, error: Optional[str] = None, targets=(), duration_ms: Optional[int] = None) -> dict:

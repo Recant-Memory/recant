@@ -4,6 +4,85 @@ What changed in each version, and the measurements behind the numbers the README
 comments use. Each measurement says what it was run on; none of it is a promise about your traffic. Measure your own
 with `recant bench` and `recant eval memory`.
 
+## 0.4.0
+
+The first step made short: wrap the client, run the app, `recant cost`. Plus fixes from a third outside developer's
+run of the whole kit on 0.3.3 (November 2026), and a stricter scorer.
+
+- **No configuration.** `recant.wrap(client)` needs no store and no tenant: the store is `$RECANT_HOME` or `./.recant/`
+  in the working directory, made when the client is wrapped, with a `.gitignore` that ignores it all, and the tenant is
+  "default". Every command finds the same store with no flags (`--store`/`--tenant` still override).
+- **The report leads with three lines:** what you spent, on how many calls over what period; what Recant can save of
+  it with no change to what the model sees, in dollars on the calls it measured (a weekly rate only once the traffic
+  spans a day); and what that rests on. Below about 20 calls it says it is too early and sizes nothing. Calls that
+  failed count in what was spent, for the usage they reported, and models with no price are named, never dropped; a
+  saving is sized on its job's bill since the job's settings last changed. `recant cost --json` carries the lines as
+  `summary`.
+- **`recant apply`** turns on the safe savings that are ready (the nightly pass's own rule: a lever that changes only
+  cache markers, at least 20 runs of its job); `--dry-run` shows what each would change in a request and changes
+  nothing; a lever not yet ready says why. A call made outside any `client.run` counts as a run of its own here: the
+  wrapper keeps one run open per client for the life of the process, so a service that never opens a run would have
+  waited for ever.
+- **Calls outside any `client.run` are threaded by conversation.** With only `recant.wrap`, every call of a process
+  lands in one run, and with several conversations in flight their calls interleave: a developer's wrap-only app (40
+  tasks, four at a time) had 3 of 64 calls seen to extend the one before, and was told there was no safe saving. Each
+  such call is now given the conversation it continues, found by content (the longest earlier request whose messages
+  are a prefix of its own, as the cache itself finds one; a request that branches off an earlier point of a
+  conversation starts one of its own, so no reuse is claimed that the cache may not give), and that run closes when
+  the process exits, so the coverage watch writes too (it had read "the watch was not on").
+- **A breakpoint where it pays.** `breakpoint.add` is sized per job and applied only to the jobs where its reads
+  outweigh the write premium: a job of one call per run (a writer handed a fresh brief each time) pays to write and
+  never reads, and is now left out and sent with no marker. The lever's line gives each job's part; its share, its
+  20-run readiness and its later check are all of the jobs it is applied to.
+- **Under a day of traffic,** the report's header says how long the traffic ran inside the window, and the levers
+  table gives dollars as measured, not "/wk" figures scaled from minutes. The latency line names calls over 30 s,
+  which a p95 can hide (four 62-second calls in 84, each the SDK retrying inside the call).
+- **The cache minimum.** A prefix shorter than the model's minimum (512 tokens on the 5.x models, up to 4,096 on
+  older ones; `recant.costshape.CACHE_MIN_TOKENS`, from the vendor's documentation read 2026-11-06; an unlisted model
+  is taken at 4,096) is sent with its marker and silently not cached. `breakpoint.add` is no longer sized on such
+  calls: before, a job of short prompts was offered a saving that could not come.
+- **`recant doctor`** checks the version, the SDK, the store, the switch, metering, prices and coverage, one line each
+  with what to do about each problem (calls to another provider are named, not a fault: the wrapper is Anthropic's
+  only); it makes no directory and writes no friction log (on an existing store, its
+  writable check creates one new temporary file and removes it), and exits 1 while anything needs fixing.
+- **`--json` on every command,** each output naming its schema (`"schema": "recant-cost/1"`, ...; within a version,
+  fields are added, never renamed or removed). `recant feedback --json` prints the bundle and writes nothing; writing
+  it still asks first, piped answers work, and a closed stdin reads as blank answers and writes nothing (it had been
+  reported as a fault in Recant). Progress goes to stderr.
+- **Errors are one line** on stderr saying what to change, usage mistakes included: exit 1 or 2 for a problem with
+  the input or the setup, exit 3 for a fault in Recant itself, judged by where it was raised (`RECANT_DEBUG=1` shows
+  the traceback). A hook (`--run`, `--grade`, `--client`,
+  `--load`) that is not found says which, and how its module is looked up.
+- **For coding agents:** `AGENTS.md` (the recipe, and how to run the tests), a Claude Code skill in `skills/recant/`,
+  `llms.txt` opening with the recipe, and the recipe at the foot of `recant --help`. The README opens with it, and
+  PyPI now shows the README.
+- **The scorer counts single letters and digits** (`recant.notes.parts`/`holds`, used by `recant eval memory`'s
+  words-only check and by the notes evidence rule). Before, every word under two characters was dropped, so a reply
+  of "B minus" scored right against the key "A minus", and "3" against "5". Now every single letter and digit counts
+  as a whole word ("b" is not found inside "but", nor "5" inside "15"); only a lowercase "a" or "i", as written, is
+  left out as an article or a pronoun, and an uppercase single letter always counts. A value must also pass the rule
+  before 0.4.0, so the check is stricter by construction ("X Y" is still not found in "Y X", nor "a 5" in "5"), and a
+  test holds it to the old rule over a grid of values and texts. The notes evidence check, which uses it, can only
+  get stricter. Rescored with the new rule, the 1,020 saved answers of the memory measurement on synthetic
+  principals' sessions (0.2.x, below; 255 questions, four arms) change no verdict: words only 20, 220, 220, 146 and value match 20, 255, 255, 197 of 255
+  (none, history, notes, memory v2), as before; 28 of its keys hold a single character, most of them absent
+  questions' "I don't know", which their own check scores.
+- From the reruns on the fixed candidate: `recant apply` names the jobs a lever is applied to and those it leaves
+  off, and why; the coverage line says what the coverage watch is; the output-cap line says when thinking filled the
+  output; `recant eval memory --estimate` prints progress; the bench report's setup section is a list, not raw JSON;
+  `recant feedback --help` lists the six questions; and the first screen gives `client.run` its `session=`.
+- From the developer's run:
+  - a suggested shorter key drops the question's words from its start only (trimming the end had left "EUR 50,000
+    excluding");
+  - the bench's Quality section prints the verdict's own quality line, with the interval under "for reference";
+  - "failed tasks" are now "runs that raised", and a task that ran and scored 0 is said to count in the pass rate;
+  - a lever's prediction line says it is the saving over the arm's paired tasks;
+  - the eval's total spend counts its own estimate and the question drafting under the same `--out`, itemised;
+  - `recant coverage --usage` gives no cost share when unpriced traffic went unseen, and says how to count it;
+  - the feedback form says its minutes count from the first `recant` command;
+  - the README says how to check the pass-through's bytes yourself, and that Claude Haiku 5.5 thinks by default (a
+    job on it with no `thinking` parameter shows a reasoning share, and thinking counts against `max_tokens`).
+
 ## 0.3.3
 
 From a second outside developer's run of the whole kit on 0.3.2, on the same kind of app (November 2026). Each item is
