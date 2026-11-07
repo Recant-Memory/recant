@@ -80,7 +80,8 @@ def run(store, tenant: str) -> list[dict]:
         ours = [u for u in un if u.get("provider") == "anthropic"]          # a client recant.wrap could have wrapped
         other = [u for u in un if u.get("provider") != "anthropic"]
         if not unseen:
-            out.append(_check("coverage", True, f"Recant saw all {cov.get('calls_seen', 0)} model calls the watch could see"))
+            out.append(_check("coverage", True, f"Recant saw all {cov.get('calls_seen', 0)} model calls; its coverage watch "
+                              "found none going around it in the wrapped processes"))
         if ours:
             out.append(_check("coverage", False, f"{sum(u['requests'] for u in ours)} Anthropic calls went past Recant: "
                               f"{where(ours)}", "wrap that client too: recant.wrap(anthropic.Anthropic()) or AsyncAnthropic"))

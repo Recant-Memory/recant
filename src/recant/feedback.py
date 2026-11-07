@@ -66,7 +66,7 @@ _ARM = re.compile(r"^(off|safe|safe\+(reasoning|effort)\.agent)$")
 LEVERS = frozenset({"advice.trim_tool_output", "breakpoint.add", "fix.duplicate_background", "fix.segment_changed",
                     "fix.tool_loop", "fold.window_only", "handoff.session", "postreply.write", "ttl.prefix",
                     "memory.core_budget", "memory.slice_budget", "memory.memory_budget", "cost per task"})
-_BY_JOB = re.compile(r"^(batch|effort|reasoning|fix\.output_cap)\.(.+)$")
+_BY_JOB = re.compile(r"^(batch|effort|reasoning|fix\.output_cap|fix\.system_order)\.(.+)$")
 _BY_KEY = re.compile(r"^(fix\.metered_not_billed|fix\.unmetered)\.(.+)$")
 ENUMS = {"commit_from": {"source checkout", "install record", "release build", "source checkout, uncommitted changes", "unknown"},
          "kind": {"safe", "your_call", "applied", "bench", "eval_memory", "fix_cause", "advice", "finding"},

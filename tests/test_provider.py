@@ -331,3 +331,17 @@ def test_a_retryable_error_is_tried_again_with_backoff_before_the_call_fails(mac
     with pytest.raises(ProviderError):
         p.call(req("q", tier=Tier.T2))
     assert waits == [2.0, 4.0, 8.0]
+
+
+def test_a_failed_batch_result_logs_the_0_4_1_fields_too(machinery, log):
+    def responder(model, r):
+        if r.custom_id == "b":
+            return ProviderError("overloaded", "try later")
+        return Raw((text("ok"),), "end_turn", Usage(input=10, output=1))
+
+    p = FakeProvider(machinery, log, responder, prices=PRICES)
+    handle = p.submit_batch([req("alpha", custom_id="a"), req("beta", custom_id="b", system=(text("Follow the rules."),))])
+    list(p.batch_results(handle))
+    calls = records(log, "model_call")
+    failed = [c for c in calls if c["custom_id"] == "b"]
+    assert failed and failed[0]["error"] and failed[0]["setting_fp_rest"] and failed[0]["system_prefix"] is not None

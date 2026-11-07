@@ -155,3 +155,14 @@ def test_a_host_records_its_tool_calls_and_the_advisor_reads_them(layout):
 def m_path(layout):
     (p,) = sorted(layout.log_dir(TENANT).glob("*.jsonl"))
     return p
+
+
+def test_the_providers_own_call_logs_the_0_4_1_fields_hashes_only(layout, machinery):
+    from dataclasses import replace as _replace
+    with LogWriter(layout, TENANT, "t", artifact_hash=machinery.artifact_hash, kernel_hash=machinery.kernel_hash) as log:
+        r = req()
+        r = _replace(r, system=(text("Follow the house style. " * 120 + "The user is Alice."),) + tuple(r.system[1:]))
+        BaseProvider(machinery, log, Client()).call(r)
+    (a,) = calls(log)
+    assert a["setting_fp_rest"] and a["system_prefix"] and a["system_suffix"]
+    assert "house style" not in json.dumps(a) and "Alice" not in json.dumps(a)

@@ -398,6 +398,7 @@ def _call(c: dict, rid: str, seq: int, log_run: str) -> dict:
                 output=u.get("output", 0), reasoning=u.get("reasoning", 0), cost=c.get("billed_usd"),
                 batch=c.get("batch_id") is not None, segments=c.get("segments"), stop_reason=c.get("stop_reason"),
                 setting_fp=c.get("setting_fp") or _old_fp(c), extends_previous=c.get("extends_previous"),
+                setting_rest=c.get("setting_fp_rest"), sys_prefix=c.get("system_prefix"), sys_suffix=c.get("system_suffix"),
                 error=c.get("error"), ttft=None if c.get("ttft_ms") is None else c["ttft_ms"] / 1000,
                 overhead=None if c.get("overhead_ms") is None else c["overhead_ms"] / 1000, bench_task=c.get("bench_task"))
 
@@ -1081,19 +1082,159 @@ def _old_fp(c: dict) -> Optional[str]:
     return f"{c['model_id']}:{segs[0]['hash']}" if segs else None
 
 
-def _fingerprint_changes(calls: list) -> list[dict]:
-    """A job sending a request with settings it has never sent before (model, effort, output cap, tools,
-    instructions) is a setting change for that job alone. Going back to settings it already uses is not: a chat that
-    sometimes answers on another model does not restart its window each time."""
-    out, seen = [], {}
+def _common(a: Optional[list], b: Optional[list]) -> int:
+    """The longest length, in characters, at which two calls' system-prompt hashes agree (0: none)."""
+    if not a or not b:
+        return 0
+    hb = {k: h for k, h in b}
+    return max((k for k, h in a if hb.get(k) == h), default=0)
+
+
+def _lcp(members: list) -> int:
+    """The leading part every one of these prompts shares, in characters (prefixes nest: the least of each one's
+    share with the first)."""
+    first = members[0]["sys_prefix"]
+    return min([_common(first, m["sys_prefix"]) for m in members[1:]] or [first[-1][0]])
+
+
+def stable_starts(calls: list) -> dict[str, dict]:
+    """Per job: which part of each system prompt is a setting, judged the way the cache reads it (0.4.1). The cache
+    keeps a prefix per model, at least the model's minimum long, so prompts are compared per (job, model): two distinct
+    prompts are one fixed part when they share at least that minimum from the start (a family). A prompt's head, what
+    a setting change is judged on, is:
+
+    - in a family: what the whole family shares from the start (a per-request name or brief after a fixed opening
+      stays out of it);
+    - a prompt of its own that opens two or more requests (sent fresh, not as the next turn of a conversation): all of
+      it (a fixed prompt);
+    - a prompt of its own that opens one request only: nothing (content: a per-request part at the top, or a one-off).
+
+    In a family whose prompts each open two or more requests (no per-request member), each whole prompt is also a
+    variant, and a new variant is a change: instructions added to or cut from a fixed prompt. A family with a
+    per-request member is a template, and its variants do not count. Only the window's calls are read: the same calls
+    give the same heads. `heads` maps each call (by id) to (head length, head hash, variant or ""); `content` lists the
+    calls whose prompt is content only. Jobs whose calls carry no hashes are left out."""
+    by: dict = {}
+    old_opens: dict = {}                                     # calls logged before 0.4.1: their openings, by whole fingerprint
+    first_use, last_in = set(), {}                          # a call that opens its prompt: a fresh request, or one whose
+    for c in sorted(calls, key=lambda c: c["start"]):       # conversation switched to this prompt (from another, or from
+        conv = (c["job"], c.get("session") or c["run"])     # none): a growing history does not mean the system prompt
+        key = c["sys_prefix"][-1][1] if c.get("sys_prefix") else None   # stayed the same
+        if not c.get("extends_previous") or last_in.get(conv, "unset") != key:
+            first_use.add(id(c))
+        last_in[conv] = key
     for c in sorted(calls, key=lambda c: c["start"]):
-        fp = c.get("setting_fp")
+        if c.get("sys_prefix") and c.get("setting_rest"):
+            by.setdefault((c["job"], c["model"]), []).append(c)
+        elif c.get("setting_fp") and not c.get("extends_previous"):
+            old_opens[(c["job"], c["setting_fp"])] = old_opens.get((c["job"], c["setting_fp"]), 0) + 1
+    out: dict = {}
+    for (job, model), cs in by.items():
+        floor = cache_min(model) * CHARS_PER_TOKEN
+        at_floor = -(-int(floor) // 256) * 256              # the first hashed boundary at or past the minimum
+        prompts: dict = {}                                    # a prompt's full hash -> its calls, in order
+        for c in cs:
+            prompts.setdefault(c["sys_prefix"][-1][1], []).append(c)
+        opens = {k: sum(1 for c in pcs if id(c) in first_use)
+                    + sum(old_opens.get((job, fp), 0) for fp in {c.get("setting_fp") for c in pcs})   # the same prompt, logged
+                 for k, pcs in prompts.items()}                                                      # before 0.4.1 too
+        family: dict = {}                                     # the hash at the minimum -> the prompts that share it
+        for key, pcs in prompts.items():
+            h = dict((k, v) for k, v in pcs[0]["sys_prefix"]).get(at_floor)
+            if h is not None:
+                family.setdefault(h, []).append(key)
+        fam_of = {k: f for f, ks in family.items() for k in ks if len(ks) >= 2}
+        fam_head = {f: _lcp([prompts[k][0] for k in ks]) for f, ks in family.items() if len(ks) >= 2}
+        fixed_family = {f for f, ks in family.items() if len(ks) >= 2 and all(opens[k] >= 2 for k in ks)}
+        st = out.setdefault(job, {"heads": {}, "content": [], "calls": 0, "prompts": 0, "floor_chars": {}, "opening": set()})
+        st["opening"] |= {id(c) for c in cs if id(c) in first_use}
+        for key, pcs in prompts.items():
+            pre = dict((k, v) for k, v in pcs[0]["sys_prefix"])
+            full = pcs[0]["sys_prefix"][-1][0]
+            if key in fam_of:
+                head = fam_head[fam_of[key]]                  # the family's shared start
+                variant = key if fam_of[key] in fixed_family else ""
+            elif opens[key] >= 2:
+                head, variant = full, ""                      # a fixed prompt of its own
+            else:
+                head, variant = 0, ""
+            for c in pcs:
+                st["heads"][id(c)] = (head, pre.get(head, "") if head else "", variant)
+                if not head:
+                    st["content"].append(c)
+        st["calls"] += len(cs)
+        st["prompts"] += len(prompts)
+        st["floor_chars"][model] = floor
+    for job, st in out.items():
+        latest = max((c for c in calls if c["job"] == job), key=lambda c: c["start"])
+        st["latest"] = latest
+        st["start"] = st["heads"].get(id(latest), (0,))[0]
+        st["model"] = latest["model"]
+        st["full"] = latest["sys_prefix"][-1][0] if latest.get("sys_prefix") else 0
+    return out
+
+
+def setting_key(c: dict, starts: dict) -> Optional[str]:
+    """What a setting change is judged on: the settings apart from the system prompt, and the system prompt's head
+    (`stable_starts`; 0.4.1). A call logged without the hashes keeps its whole fingerprint; a call whose prompt is
+    content only has no key, and is never a change."""
+    st = starts.get(c["job"])
+    if st is None or not c.get("setting_rest"):
+        return c.get("setting_fp")
+    if not c.get("sys_prefix"):                           # this call sent no system prompt
+        return f"{c['setting_rest']}:none"
+    head, h, _ = st["heads"].get(id(c), (None, None, None))
+    if head is None:
+        return c.get("setting_fp")
+    return f"{c['setting_rest']}:{head}:{h}" if head else f"{c['setting_rest']}:content"
+
+
+def _fingerprint_changes(calls: list) -> list[dict]:
+    """A job sending a request with settings it has never sent before (model, effort, output cap, tools, the system
+    prompt's stable start) is a setting change for that job alone. Going back to settings it already uses is not: a
+    chat that sometimes answers on another model does not restart its window each time. A per-request name or brief in
+    the system prompt, after its fixed opening, is content, not a setting: the prompt is judged by the part that stays
+    the same (`stable_starts`)."""
+    out, seen, new_format, variants, rests, heads = [], {}, {}, {}, {}, {}
+    starts = stable_starts(calls)
+    for c in sorted(calls, key=lambda c: c["start"]):
+        fp = setting_key(c, starts)
         if not fp:
             continue
-        known = seen.setdefault(c["job"], set())
-        if known and fp not in known:
-            out.append({"at": c["start"], "jobs": [c["job"]], "what": f"{c['job']} sends new settings"})
-        known.add(fp)
+        job = c["job"]
+        st = starts.get(job)
+        fmt = bool(c.get("setting_rest")) and fp != c.get("setting_fp")   # keyed by parts (0.4.1), or whole
+        head = fp.split(":", 1)[1] if fmt else None                       # the system prompt's part of the key
+        variant = st["heads"].get(id(c), (0, "", ""))[2] if st else ""
+        if fmt and new_format.get(job) is False:          # the first call logged with 0.4.1's hashes, after calls
+            rests.setdefault(job, set()).add(c["setting_rest"])   # without: a new way of keying, not a new setting
+            if head != "content":
+                heads.setdefault(job, set()).add(head)
+            if variant:
+                variants.setdefault((job, head), set()).add(variant)
+            new_format[job] = True
+            continue
+        new_format[job] = fmt
+        if not fmt:                                       # a call logged before 0.4.1: its whole fingerprint, as before
+            known = seen.setdefault(job, set())
+            if known and fp not in known:
+                out.append({"at": c["start"], "jobs": [job], "what": f"{job} sends new settings"})
+            known.add(fp)
+            continue
+        changed = False                                   # each part judged on its own: the other settings, the system
+        rs = rests.setdefault(job, set())                 # prompt's fixed part, its fixed variant
+        changed = bool(rs) and c["setting_rest"] not in rs
+        rs.add(c["setting_rest"])
+        if head != "content":                             # a prompt that is content only is never a change by itself
+            hs = heads.setdefault(job, set())
+            changed = changed or (bool(hs) and head not in hs)
+            hs.add(head)
+            if variant:
+                vs = variants.setdefault((job, head), set())
+                changed = changed or (bool(vs) and variant not in vs)
+                vs.add(variant)
+        if changed:
+            out.append({"at": c["start"], "jobs": [job], "what": f"{job} sends new settings"})
     return out
 
 
@@ -1551,6 +1692,68 @@ def detect_output_cap(rep: Report) -> list[Lever]:
     return out
 
 
+CHARS_PER_TOKEN = 4.0                    # a stable start is measured in characters; its tokens are estimated at this
+
+
+def detect_system_order(rep: Report) -> list[Lever]:
+    """A job whose system prompts are content from the start (a per-request name or brief at the top, so no two share
+    the model's cacheable minimum, and none opens another request): no conversation can reuse another's prompt from
+    the cache (within one, its later turns resend the same prompt and can). One line per job, while its latest call
+    is such a prompt. When all of those prompts share an ending long enough to cache, it is sized as if put first, over
+    the conversations' opening calls only: each reads it at the cache-read rate when the opening before it, on the same
+    model and settings, is within the cache's lifetime, and writes it (that lifetime's premium) when not; each priced
+    on its own whole prompt's card, at the batch rate when batched."""
+    out = []
+    starts = stable_starts(rep.calls)
+    ttl = TTL_SECONDS.get(rep.host.prefix_ttl, TTL_SECONDS["5m"])
+    for job, st in sorted(starts.items()):
+        latest = st["latest"]                              # the job's latest call: is it content from the top?
+        if not latest.get("sys_prefix") or st["heads"].get(id(latest), (1,))[0]:
+            continue
+        cs = sorted((c for c in st["content"] if c["model"] == latest["model"]), key=lambda c: c["start"])
+        opening = [c for c in cs if id(c) in st["opening"]]  # a conversation's later turns resend its prompt whole:
+                                                              # it can already be read; across them, not
+        if len(cs) < 2 or latest["sys_prefix"][-1][0] < st["floor_chars"][latest["model"]]:
+            continue
+        floor = cache_min(st["model"])
+        distinct = list({c["sys_prefix"][-1][1]: c for c in cs}.values())
+        start = _lcp(distinct) / CHARS_PER_TOKEN
+        tail = min(_common(distinct[0]["sys_suffix"], d["sys_suffix"]) for d in distinct[1:]) / CHARS_PER_TOKEN \
+            if len(distinct) > 1 else 0.0
+        usd = share = None
+        tokens = 0.0
+        if tail >= floor:
+            gain, prev = 0.0, {}                           # the cache is per model and setting (tools come first)
+            premium = "wl" if rep.host.prefix_ttl == "1h" else "w"
+            for c in opening:
+                pf = rep.profiles.get(c["model"])
+                if pf is None:
+                    continue
+                p = pf.at(c["uncached"] + c["cache_read"] + c["cache_write"])   # the card the whole prompt pays
+                k = (c["model"], c.get("setting_rest"))
+                scale = p.batch if c.get("batch") else 1.0
+                if k in prev and c["start"] - prev[k] <= ttl:
+                    gain += tail * p.p * (1 - p.r) * scale
+                    tokens += tail
+                else:
+                    gain -= tail * p.p * (getattr(p, premium) - 1) * scale
+                prev[k] = c["start"]
+            if gain > 0:
+                usd = gain
+                bill = rep.job_bill({job})
+                share = gain / bill if bill else None
+        note = (f"job {job}'s system prompts differ from their first ~{start:,.0f} tokens on, under {st['model']}'s "
+                f"{floor:,}-token cache minimum, so no conversation can reuse another's: put the per-request part after "
+                "the fixed instructions"
+                + (f"; the last ~{tail:,.0f} tokens are the same in all of them, and put first they would have saved "
+                   f"about {_usd(usd)} over these {len(opening)} conversations" if usd else ""))
+        out.append(Lever(f"fix.system_order.{job}", "fix_cause", job, tokens * rep.per_week,
+                         None if usd is None else usd * rep.per_week, share, False, state="finding",
+                         evidence={"stable_start_tokens": round(start), "shared_end_tokens": round(tail), "calls": len(cs),
+                                   "conversations": len(opening), "cache_min": floor}, note=note))
+    return out
+
+
 def detect_duplicate_background(rep: Report) -> Optional[Lever]:
     seen, dup, reruns = {}, [], []
     for b in sorted(rep.background, key=lambda b: b["start"]):
@@ -1669,6 +1872,7 @@ def advise(rep: Report, *, overlay: Optional[dict] = None, ledger: Optional[list
         levers += [lv for lv in lever_reasoning(r, runs={b["run"] for b in r.background if b["job"] == job})
                    if not any(x.id == lv.id for x in levers)]
     levers += detect_output_cap(rep)
+    levers += detect_system_order(rep)
     bg_of = {c["job"]: b["job"] for b in rep.background for c in rep.calls if c["run"].split(":")[0] == b["run"]}
     for lv in levers:
         if lv.kind != "fix_cause" and lv.id != "advice.trim_tool_output":

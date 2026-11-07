@@ -88,3 +88,22 @@ def test_coverage_names_another_providers_calls_without_calling_them_a_fault(mon
         {"provider": "anthropic", "host": "api.anthropic.com", "model": "claude-haiku-5-5", "requests": 2}]}
     cov = [c for c in doctor.run(store, "default") if c["check"] == "coverage"]
     assert not cov[0]["ok"] and "recant.wrap" in cov[0]["fix"]
+
+
+
+def test_the_coverage_check_says_what_the_watch_is_as_the_cost_report_does(tmp_path, monkeypatch):
+    from recant import costshape as cs
+
+    class Rep:
+        watched, calls, profiles = True, [], {}
+
+        def coverage(self):
+            return {"calls_seen": 12, "calls_unseen": 0, "unseen": []}
+    store = tmp_path / "s"
+    client = wrap(sdk(API()), store=store, tenant="default")
+    with client.run(session="x"):
+        client.messages.create(**REQ)
+    monkeypatch.setattr(cs, "report", lambda *a, **k: Rep())
+    cov = [c for c in doctor.run(store, "default") if c["check"] == "coverage"]
+    assert cov[0]["detail"] == ("Recant saw all 12 model calls; its coverage watch found none going around it in the "
+                                "wrapped processes")

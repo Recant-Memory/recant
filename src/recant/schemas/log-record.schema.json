@@ -2300,6 +2300,18 @@
           "default": null,
           "title": "Setting Fp"
         },
+        "setting_fp_rest": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Setting Fp Rest"
+        },
         "stop_reason": {
           "anyOf": [
             {
@@ -2311,6 +2323,38 @@
           ],
           "default": null,
           "title": "Stop Reason"
+        },
+        "system_prefix": {
+          "anyOf": [
+            {
+              "items": {
+                "items": {},
+                "type": "array"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "System Prefix"
+        },
+        "system_suffix": {
+          "anyOf": [
+            {
+              "items": {
+                "items": {},
+                "type": "array"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "System Suffix"
         },
         "tenant": {
           "title": "Tenant",

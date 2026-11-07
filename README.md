@@ -80,7 +80,7 @@ pip install "recant[anthropic]"
 Or from GitHub, pinned to a tag:
 
 ```
-pip install "recant[anthropic] @ git+https://github.com/recant-memory/recant@v0.4.0"
+pip install "recant[anthropic] @ git+https://github.com/recant-memory/recant@v0.4.1"
 ```
 
 `recant --version` prints the version and the commit it was built from: `release build` from PyPI (0.3.3 on),
@@ -123,6 +123,14 @@ with client.run("agent", session="chat-1"):            # optional: name the agen
   failure is counted in the friction log; the coverage watch never fails an HTTP request. `recant.wrap(...)` itself
   raises on a store it cannot create.
 - **The store** is fixed when you wrap: a relative path is resolved then.
+- **Settings.** A lever is priced from its job's last change of settings: the model, effort, output cap, tools, or the
+  system prompt's fixed part. Prompts that share at least the model's cacheable minimum from the start are one fixed
+  part, judged by what they all share, so a per-request name or brief after a fixed opening is content, not a change;
+  a prompt that opens two or more requests is a fixed prompt, so replacing it, or adding to or cutting it where every
+  prompt of the job is fixed, is a change. A job whose prompts share no cacheable start and each open one request
+  only (a per-request part at the top) is named in the report: no conversation can reuse another's prompt, and
+  moving that part below the fixed instructions is a saving the report sizes, across conversations, when all of them
+  share an ending long enough to cache.
 - **Checking the pass-through yourself.** Hash each request body as the SDK sends it, run once with `recant off` and
   once with `recant on` before `recant apply`: the digests match, and match the unwrapped client's. After `recant
   apply` the only difference is `cache_control` fields.

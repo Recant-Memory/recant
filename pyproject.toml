@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "recant"
-version = "0.4.0"         # see CHANGELOG.md (above the empty 0.0.1 name reservation on PyPI)
+version = "0.4.1"         # see CHANGELOG.md (above the empty 0.0.1 name reservation on PyPI)
 description = "See what your Anthropic calls cost and what you'd save, with one line: recant.wrap(client), then recant cost and recant apply. Prompt-caching savings that change nothing the model sees, checked against their prediction; managed memory; and the bench that proves both."
 readme = "README.md"
 keywords = ["LLM cost", "Anthropic", "Claude", "prompt caching", "agent", "token usage", "cost tracking", "memory"]

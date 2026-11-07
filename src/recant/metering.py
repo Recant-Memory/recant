@@ -82,6 +82,64 @@ def setting_fingerprint(req) -> str:
     return hashlib.sha256(canonical_json(body).encode()).hexdigest()[:16]
 
 
+def setting_parts(req) -> dict:
+    """The 0.4.1 fields for a provider request: its settings without the instructions, and the instructions' (the
+    first system block's) prefix and suffix hashes, so a change is judged on their stable start (`setting_fp_rest`,
+    `system_prefix`, `system_suffix`). Hashes only."""
+    first = req.system[0] if req.system else None
+    body = {"model": req.model, "effort": req.effort, "max_tokens": req.max_tokens, "reasoning": req.reasoning,
+            "schema": req.output_schema, "tools": [asdict(t) for t in req.tools], "instructions": None}
+    prefix, suffix = system_hashes([{"type": "text", "text": first.text}] if first is not None else None)
+    return {"setting_fp_rest": hashlib.sha256(canonical_json(body).encode()).hexdigest()[:16], "system_prefix": prefix,
+            "system_suffix": suffix}
+
+
+SYSTEM_STEP = 256                      # characters between the boundaries a system prompt is hashed at, to 16,384,
+SYSTEM_STEP_FAR = 1024                 # then this many; block ends and the full length always
+
+
+def _system_text(system) -> tuple[str, list[int]]:
+    """The system prompt's text as the cache reads it, in order, and where each block ends."""
+    if not system:
+        return "", []
+    if isinstance(system, str):
+        return system, [len(system)]
+    text, ends = "", []
+    for b in system if isinstance(system, list) else [system]:
+        t = b.get("text") if isinstance(b, dict) and isinstance(b.get("text"), str) else canonical_json(b)
+        text += t + "\x1e"
+        ends.append(len(text))
+    return text, ends
+
+
+def _bounds(n: int, ends: list[int]) -> list[int]:
+    out = set(e for e in ends if 0 < e <= n) | {n}
+    out |= set(range(SYSTEM_STEP, min(n, 16_384) + 1, SYSTEM_STEP))
+    out |= set(range(16_384 + SYSTEM_STEP_FAR, n + 1, SYSTEM_STEP_FAR))
+    return sorted(k for k in out if k > 0)
+
+
+def system_hashes(system) -> tuple:
+    """([chars, hash] of the text up to each boundary, [chars, hash] of the last chars at the same lengths): hashes
+    only, never the text. How much of a system prompt stays the same from call to call is read from these."""
+    text, ends = _system_text(system)
+    if not text:
+        return None, None
+    ks = _bounds(len(text), ends)
+    pre, suf, h = [], [], hashlib.sha256()
+    last = 0
+    for k in ks:
+        h.update(text[last:k].encode())
+        last = k
+        pre.append([k, h.copy().hexdigest()[:12]])
+    hs, last, rev = hashlib.sha256(), 0, text[::-1]
+    for k in ks:
+        hs.update(rev[last:k].encode())
+        last = k
+        suf.append([k, hs.copy().hexdigest()[:12]])
+    return pre, suf
+
+
 class Meter:
     """Metering for a host that keeps its own model client: after each call, the host hands over
     what it sent and what came back, and the same model_call record Recant's own provider writes goes into the log —
@@ -136,9 +194,12 @@ class Meter:
         body = {"model": model, "effort": effort, "max_tokens": max_tokens, "reasoning": reasoning, "schema": None,
                 "tools": tools or [], "instructions": system}
         fp = hashlib.sha256(canonical_json(body).encode()).hexdigest()[:16]
+        rest = hashlib.sha256(canonical_json(dict(body, instructions=None)).encode()).hexdigest()[:16]
+        prefix, suffix = system_hashes(system)
         u = {k: int(usage.get(k) or 0) for k in ("input", "output", "cache_read", "cache_write", "reasoning", "cache_write_long")}
         rec = dict(model_id=model, job=job, request_hash="sha256:" + hashlib.sha256("".join(msgs).encode()).hexdigest(),
-                   usage=u, cost_usd=cost_usd, session=session, setting_fp=fp, key=self.key_label, extends_previous=extends,
+                   usage=u, cost_usd=cost_usd, session=session, setting_fp=fp, setting_fp_rest=rest, system_prefix=prefix,
+                   system_suffix=suffix, key=self.key_label, extends_previous=extends,
                    latency_ms=latency_ms, stop_reason=stop_reason, error=error, ttft_ms=ttft_ms, overhead_ms=overhead_ms,
                    bench_task=bench_task)
         rec.update({k: v for k, v in (("via", via), ("billing", billing), ("calls", calls), ("billed_usd", billed_usd)) if v is not None})

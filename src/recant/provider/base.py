@@ -5,13 +5,13 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import replace
+from dataclasses import asdict, replace
 from typing import Any, Iterator, Optional
 
 from ulid import ULID
 
-from ..metering import segment_hashes, setting_fingerprint
-from ..log.hashing import request_hash
+from ..metering import segment_hashes, setting_fingerprint, setting_parts
+from ..log.hashing import canonical_json, request_hash
 from ..machinery import Machinery
 from .interface import BatchHandle, Completion, ModelRequest, ModelResponse, Prices, ProviderError, Usage, has_batch
 
@@ -34,6 +34,18 @@ class BaseProvider:
         if prices is not None:
             self.prices = prices
         self._polled: dict[str, Any] = {}
+        self._last: dict = {}              # (job, session) -> the previous request's messages, for extends_previous
+
+    def _extends(self, req: ModelRequest, last: Optional[dict] = None) -> Optional[bool]:
+        """Whether this request only appends to the previous one of its job and session (as `Meter` records it).
+        `last`: the history to read and update instead of the provider's own (a batch stages its updates until it is
+        submitted)."""
+        last = self._last if last is None else last
+        msgs = [canonical_json(asdict(m)) for m in req.messages]
+        key = (req.job, req.session)
+        prev = last.get(key)
+        last[key] = msgs
+        return None if prev is None else (len(msgs) > len(prev) and msgs[:len(prev)] == prev)
 
     # transport: the client's, unless a subclass supplies its own -------------
     def _send(self, model: str, req: ModelRequest) -> Raw:
@@ -93,6 +105,7 @@ class BaseProvider:
         started = time.monotonic()
         rhash = request_hash(req.to_dict())
         segs, sfp = segment_hashes(req), setting_fingerprint(replace(req, model=model, tier=None))
+        parts = dict(setting_parts(replace(req, model=model, tier=None)), extends_previous=self._extends(req))
         attempt = 0
         while True:
             try:
@@ -101,14 +114,14 @@ class BaseProvider:
             except ProviderError as exc:                # each failed attempt is logged: a stalled stream may be billed
                 self.log.emit("model_call", key=self.key_label, model_id=model, tier=tier, job=req.job, request_hash=rhash,
                               usage=_usage_dict(Usage()), cost_usd=self._zero(model), custom_id=req.custom_id, session=req.session,
-                              latency_ms=_ms(started), error=str(exc), segments=segs, setting_fp=sfp)
+                              latency_ms=_ms(started), error=str(exc), segments=segs, setting_fp=sfp, **parts)
                 if not exc.retryable or attempt >= self.retries:
                     raise
                 self.sleep(self.backoff_s * 2 ** attempt)
                 attempt += 1
                 started = time.monotonic()
         return self._settle(model, tier, req.job, rhash, raw, custom_id=req.custom_id, latency_ms=_ms(started), session=req.session,
-                            segments=segs, setting_fp=sfp)
+                            segments=segs, setting_fp=sfp, parts=parts)
 
     def count_tokens(self, req: ModelRequest) -> int:
         return self._count_tokens(self.resolve(req), req)
@@ -117,6 +130,7 @@ class BaseProvider:
         if not reqs:
             raise ValueError("an empty batch")
         items, meta = [], []
+        staged = dict(self._last)                     # committed only once the batch is submitted
         for req in reqs:
             model = self.resolve(req)
             cid = req.custom_id or f"r-{ULID()}"
@@ -124,10 +138,13 @@ class BaseProvider:
             meta.append({"custom_id": cid, "model": model, "job": req.job,
                          "tier": int(req.tier) if req.tier is not None else None,
                          "request_hash": request_hash(req.to_dict()), "session": req.session, "segments": segment_hashes(req),
-                         "setting_fp": setting_fingerprint(replace(req, model=model, tier=None))})
+                         "setting_fp": setting_fingerprint(replace(req, model=model, tier=None)),
+                         "parts": dict(setting_parts(replace(req, model=model, tier=None)),
+                                       extends_previous=self._extends(req, staged))})
         if len({m["custom_id"] for m in meta}) != len(meta):
             raise ValueError("custom ids in a batch must be unique")
         batch_id = self._submit(items)
+        self._last = staged
         handle = BatchHandle(batch_id=batch_id, job=reqs[0].job, requests=tuple(meta))
         self.log.batches_dir.mkdir(parents=True, exist_ok=True)
         (self.log.batches_dir / f"{batch_id}.json").write_text(
@@ -153,13 +170,14 @@ class BaseProvider:
             if isinstance(raw, ProviderError):
                 self.log.emit("model_call", key=self.key_label, model_id=m["model"], tier=m["tier"], job=m["job"],
                               request_hash=m["request_hash"], usage=_usage_dict(Usage()), cost_usd=self._zero(m["model"]),
-                              batch_id=handle.batch_id, custom_id=cid, error=str(raw), session=m.get("session"))
+                              batch_id=handle.batch_id, custom_id=cid, error=str(raw), session=m.get("session"),
+                              segments=m.get("segments"), setting_fp=m.get("setting_fp"), **(m.get("parts") or {}))
                 yield cid, raw
                 continue
             try:
                 yield cid, self._settle(m["model"], m["tier"], m["job"], m["request_hash"], raw,
                                         custom_id=cid, batch_id=handle.batch_id, session=m.get("session"),
-                                        segments=m.get("segments"), setting_fp=m.get("setting_fp"))
+                                        segments=m.get("segments"), setting_fp=m.get("setting_fp"), parts=m.get("parts"))
             except ProviderError as exc:
                 yield cid, exc
 
@@ -170,7 +188,8 @@ class BaseProvider:
     def _settle(self, model: str, tier: Optional[int], job: str, rhash: str, raw: Raw, *,
                 custom_id: Optional[str] = None, batch_id: Optional[str] = None,
                 latency_ms: Optional[int] = None, session: Optional[str] = None,
-                segments: Optional[list] = None, setting_fp: Optional[str] = None) -> ModelResponse:
+                segments: Optional[list] = None, setting_fp: Optional[str] = None,
+                parts: Optional[dict] = None) -> ModelResponse:
         cost = self.cost_usd(model, raw.usage, batch=batch_id is not None)
         self.log.add_cost(cost)
         self.reported(model, raw.usage, cost, batch=batch_id is not None)
@@ -179,7 +198,7 @@ class BaseProvider:
                       usage=_usage_dict(raw.usage), cost_usd=round(cost, 8) if cost is not None else None, batch_id=batch_id,
                       custom_id=custom_id, stop_reason=raw.stop_reason, request_id=raw.request_id,
                       latency_ms=latency_ms, error="refusal" if refused else None, session=session, segments=segments,
-                      setting_fp=setting_fp,
+                      setting_fp=setting_fp, **(parts or {}),
                       billed_usd=getattr(raw, "billed_usd", None))
         if refused:
             raise ProviderError("refusal", "the model declined; there is no answer to read")

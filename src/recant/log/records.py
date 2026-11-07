@@ -75,6 +75,10 @@ class ModelCall(_Rec):
     session: Optional[str] = None                  # the host conversation the call belongs to
     segments: Optional[list[dict[str, Any]]] = None   # each breakpoint: where, a hash of everything up to it, its lifetime
     setting_fp: Optional[str] = None               # the request's settings apart from its content: model, effort, cap, tools, instructions
+    setting_fp_rest: Optional[str] = None          # the same without the instructions (0.4.1): the system prompt is judged
+                                                   # by its stable start instead (system_prefix)
+    system_prefix: Optional[list[list[Any]]] = None   # [chars, hash] of the system prompt's text up to each boundary (0.4.1)
+    system_suffix: Optional[list[list[Any]]] = None   # [chars, hash] of its last chars, at the same lengths (0.4.1)
     key: Optional[str] = None                      # the consumer's label for the API key the call spent (a purpose), never the key
     extends_previous: Optional[bool] = None        # this request only appends to the previous one in its session
     batch_id: Optional[str] = None

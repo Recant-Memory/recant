@@ -4,6 +4,36 @@ What changed in each version, and the measurements behind the numbers the README
 comments use. Each measurement says what it was run on; none of it is a promise about your traffic. Measure your own
 with `recant bench` and `recant eval memory`.
 
+## 0.4.1
+
+- **A setting change is judged on the system prompt's fixed part.** Before, a job sending a system prompt it had
+  never sent before was a setting change, so a prompt carrying a per-request name or task brief changed its settings
+  on every call, and every lever of the agent jobs was priced on the last call or two. Now, read the way the cache
+  reads a prompt, per model: distinct prompts that share at least the model's cacheable minimum from the start are one
+  fixed part, judged by what they all share; a prompt that opens two or more requests (sent fresh, not as the next turn
+  of a conversation) is a fixed prompt; in a fixed part made only of such prompts, a new one is a change (instructions
+  added or cut), while a part with a per-request member is a template and its members are not; a prompt that shares no
+  cacheable start and opens one request only is content. The other settings (model, effort, output cap, tools) count
+  whatever the prompt is. Replacing a fixed prompt is a change from its first call; going back to an earlier one is
+  not; a call logged before 0.4.1 next to one logged after is not either. One case cannot be told apart: two briefs
+  each sent in two conversations, and nothing else, read as an edited fixed prompt.
+- **A per-request part at the top is named.** While a job's latest call is content from the top, `recant cost` says
+  so in one line (`fix.system_order.<job>`): no conversation can reuse another's prompt from the cache (within one,
+  the later turns resend the same prompt and can), and the per-request part belongs after the fixed instructions.
+  When all of those prompts (on the latest call's model) share an ending long enough to cache, the line sizes what
+  putting it first would have saved, over the conversations' opening calls: a read at the cache-read rate when the
+  opening before, on the same model and settings, is within the cache's lifetime, that lifetime's write premium when
+  not, each on its own whole prompt's rate card and at the batch rate when batched.
+- **The log record** gains three optional fields on a model call: `setting_fp_rest` (the settings without the system
+  prompt) and `system_prefix`/`system_suffix` (`[chars, hash]` of the system prompt's text up to, and back from, each
+  boundary: every 256 characters to 16,384, every 1,024 after, and each block's end), on `recant.wrap`'s and
+  `recant.metering.Meter`'s calls and on the provider's own (where the instructions are the first system block, as
+  before). Hashes only, never the text. A call logged before 0.4.1 keeps its whole fingerprint, and still counts
+  toward how often its prompt opened a request, while its other settings are the same as the later calls' (the only
+  way to match it, having no hashes). The provider's own calls, single and batched, now record `extends_previous` too,
+  as `recant.wrap`'s and `Meter`'s did, so a conversation's later turns are not taken for fresh requests.
+- `recant doctor`'s coverage line says what the coverage watch is, as `recant cost`'s does.
+
 ## 0.4.0
 
 The first step made short: wrap the client, run the app, `recant cost`. Plus fixes from a third outside developer's
